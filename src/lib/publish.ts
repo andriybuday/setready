@@ -77,8 +77,10 @@ export function playlistDescription(input: {
   stops: TourStop[];
 }): string {
   const order = input.bandsInPlayingOrder.join(" → ");
-  const stopLines = input.stops.map(
-    (s) => `• ${s.event_date} — ${s.venue ?? s.slug}`,
+  const stopLines = input.stops.map((s) =>
+    s.city
+      ? `• ${s.event_date} — ${s.city} · ${s.venue ?? ""}`.trimEnd()
+      : `• ${s.event_date} — ${s.venue ?? s.slug}`,
   );
   return [
     "Hear the show before doors — at every stop on this tour.",
@@ -241,7 +243,7 @@ export async function publishShowToYouTube(
   const bandsInPlayingOrder = [...new Set(songs.map((s) => s.artist_name))];
   const stops = show.tour_id
     ? await listTourStops(db, show.tour_id)
-    : [{ slug: show.slug, event_date: show.event_date, venue: show.venue }];
+    : [{ slug: show.slug, event_date: show.event_date, venue: show.venue, city: null, confidence: "confirmed" as const }];
   const displayTitle = overrides.title ?? show.title;
   const playlist = await youtube.createPlaylist(
     accessToken,

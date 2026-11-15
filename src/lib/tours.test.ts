@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { lineupFingerprint, tourSlug } from "./tours";
+import { classifyTourStops, lineupFingerprint, tourSlug } from "./tours";
+import type { TourEvent } from "./ticketmaster";
 
 describe("lineupFingerprint", () => {
   it("is order-independent for the same band set", () => {
@@ -12,6 +13,32 @@ describe("lineupFingerprint", () => {
     expect(lineupFingerprint(["Frozen Soul", "Trivium"])).not.toBe(
       lineupFingerprint(["Orbit Culture", "Trivium"]),
     );
+  });
+});
+
+describe("classifyTourStops", () => {
+  const ev = (eventDate: string, lineup: string[]): TourEvent => ({
+    eventDate, venue: "V", city: "C", region: "", country: "",
+    ticketmasterEventId: eventDate, lineup, attractionCount: lineup.length,
+  });
+  const bands = ["Frozen Soul", "Orbit Culture", "In Flames", "Trivium"];
+
+  it("confirms exact sets, infers sparse subsets inside the range, excludes other legs", () => {
+    const out = classifyTourStops(
+      [
+        ev("2026-11-18", ["Frozen Soul", "Fit for an Autopsy", "In Flames", "Trivium"]),
+        ev("2026-11-20", bands),
+        ev("2026-12-08", ["In Flames", "Trivium"]),
+        ev("2026-12-19", bands),
+      ],
+      bands,
+      "Trivium",
+    );
+    expect(out.map((s) => [s.eventDate, s.confidence])).toEqual([
+      ["2026-11-20", "confirmed"],
+      ["2026-12-08", "inferred"],
+      ["2026-12-19", "confirmed"],
+    ]);
   });
 });
 

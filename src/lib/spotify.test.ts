@@ -18,6 +18,7 @@ describe("parseSearchHit", () => {
         items: [
           {
             uri: "spotify:track:abc",
+            id: "abc",
             name: "Creeping Death",
             artists: [{ name: "Metallica" }],
           },
@@ -26,8 +27,10 @@ describe("parseSearchHit", () => {
     };
     expect(parseSearchHit(data)).toEqual({
       uri: "spotify:track:abc",
+      id: "abc",
       name: "Creeping Death",
       artists: "Metallica",
+      artistNames: ["Metallica"],
     });
   });
 

@@ -13,6 +13,7 @@ const CSS = `
   button { background: #d92323; color: #fff; border: 0; border-radius: 6px;
     padding: 12px 18px; font: inherit; font-weight: 700; cursor: pointer; margin-top: 18px; }
   button.secondary { background: #2a2a2a; margin-left: 8px; }
+  button.spotify { background: #1db954; color: #000; margin-left: 8px; }
   button:disabled { opacity: .55; cursor: wait; }
   .band { border-top: 1px solid #2c2c2c; padding-top: 8px; margin-top: 10px; }
   .src { color: #9a9a9a; font-size: 13px; margin: 2px 0 8px; }
@@ -93,9 +94,13 @@ async function load() {
   let html = "<h2>" + esc(d.show.title) + "</h2>" +
     "<p class=muted>" + esc(d.show.event_date) + (d.show.venue ? " · " + esc(d.show.venue) : "") + "</p>";
   if (d.playlists.length) {
-    html += "<p>" + d.playlists.map(p =>
-      '<a href="https://music.youtube.com/playlist?list=' + esc(p.external_playlist_id) +
-      '">Open in YouTube Music</a>').join(" ") + "</p>";
+    html += "<p>" + d.playlists.map(p => {
+      const href = p.service === "spotify"
+        ? p.external_url
+        : "https://music.youtube.com/playlist?list=" + p.external_playlist_id;
+      const label = p.service === "spotify" ? "Open in Spotify" : "Open in YouTube Music";
+      return '<a href="' + esc(href) + '">' + label + "</a>";
+    }).join(" · ") + "</p>";
   }
   html += '<p class="muted">Uncheck songs to leave out. Tape intros are excluded automatically.</p>';
   for (const b of d.bands) {
@@ -112,8 +117,15 @@ async function load() {
     }
     html += "</div>";
   }
-  html += '<button id="pub">' + (d.show.tour_slug ? "Publish tour playlist to YouTube Music" : "Publish to YouTube Music") + '</button>' +
-    '<button id="save" class="secondary">Save selection</button><p class="msg" id="msg"></p>';
+  const tourLabel = d.show.tour_slug ? " tour playlist" : "";
+  html += '<button id="pubYt">Publish' + tourLabel + ' to YouTube Music</button>' +
+    '<button id="pubSp" class="spotify">Publish' + tourLabel + ' to Spotify</button>' +
+    '<button id="save" class="secondary">Save selection</button>' +
+    (d.show.tour_slug
+      ? '<button id="imp" class="secondary">Import tour stops</button>' +
+        '<button id="sync" class="secondary">Sync descriptions</button>'
+      : "") +
+    '<p class="msg" id="msg"></p>';
   app.innerHTML = html;
   const save = async () => {
     const ids = [...document.querySelectorAll("input[data-id]:checked")].map(i => Number(i.dataset.id));
@@ -125,24 +137,46 @@ async function load() {
   document.getElementById("save").onclick = async () => {
     await save(); document.getElementById("msg").textContent = "Saved.";
   };
-  document.getElementById("pub").onclick = async (e) => {
+  const publish = (service) => async (e) => {
     const btn = e.target, msg = document.getElementById("msg");
     btn.disabled = true; msg.textContent = "Matching songs and creating playlist…";
     try {
       await save();
-      const endpoint = d.show.tour_slug
-        ? "/api/tours/" + encodeURIComponent(d.show.tour_slug) + "/publish/youtube"
-        : "/api/shows/" + encodeURIComponent(slug) + "/publish/youtube";
-      const r = await fetch(endpoint, { method: "POST" });
+      const base = d.show.tour_slug
+        ? "/api/tours/" + encodeURIComponent(d.show.tour_slug)
+        : "/api/shows/" + encodeURIComponent(slug);
+      const r = await fetch(base + "/publish/" + service, { method: "POST" });
       const d2 = await r.json();
       if (!r.ok) throw new Error(d2.message || d2.error);
-      msg.innerHTML = 'Published: <a href="' + d2.youtubeMusic + '">Open in YouTube Music</a> · ' +
+      const href = service === "spotify" ? d2.spotify : d2.youtubeMusic;
+      const label = service === "spotify" ? "Open in Spotify" : "Open in YouTube Music";
+      msg.innerHTML = 'Published: <a href="' + href + '">' + label + "</a> · " +
         d2.added + " songs" + (d2.unmatched.length
           ? "\\nUnmatched: " + d2.unmatched.map(u => u.artist + " – " + u.title).join("; ") : "") +
         ((d2.failed || []).length
           ? "\\nFailed: " + d2.failed.map(f => f.artist + " – " + f.title + " (" + f.error + ")").join("; ") : "");
     } catch (err) { msg.textContent = "Failed: " + err.message; btn.disabled = false; }
   };
+  document.getElementById("pubYt").onclick = publish("youtube");
+  document.getElementById("pubSp").onclick = publish("spotify");
+  const tourAction = (path, label) => async (e) => {
+    const btn = e.target, msg = document.getElementById("msg");
+    btn.disabled = true; msg.textContent = label + "…";
+    try {
+      const r = await fetch("/api/tours/" + encodeURIComponent(d.show.tour_slug) + path, { method: "POST" });
+      const d2 = await r.json();
+      if (!r.ok) throw new Error(d2.message || d2.error);
+      msg.textContent = label + " done: " + JSON.stringify(
+        d2.imported !== undefined
+          ? { imported: d2.imported, confirmed: d2.confirmed, inferred: d2.inferred }
+          : { updated: d2.updated, stops: d2.stops });
+    } catch (err) { msg.textContent = "Failed: " + err.message; }
+    btn.disabled = false;
+  };
+  if (d.show.tour_slug) {
+    document.getElementById("imp").onclick = tourAction("/import-stops", "Importing stops");
+    document.getElementById("sync").onclick = tourAction("/sync-descriptions", "Syncing descriptions");
+  }
 }
 load();`;
   return shell("Review show", body, script);

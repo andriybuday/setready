@@ -20,7 +20,15 @@
   (`createPlaylist` in src/lib/youtube.ts). YouTube Data API remains the
   supported route; there is no separate YouTube Music API.
 
-## Spotify spike — BLOCKED on app-owner Premium (2026-11-14)
+## Spotify spike — PASSED (2026-11-15)
+
+- App owner took one month of Premium. The original (pre-Premium)
+  refresh token stayed blocked with the same 403 a day later; a fresh
+  OAuth consent after Premium activation succeeded (`/me` returned the
+  SetReady account) and `POST /api/spotify/spike` created public
+  playlist `5RgcNnIQAGnRQJcdktOlt8` with "Creeping Death (Remastered)".
+  Lesson: re-consent after a subscription-status change.
+- Earlier diagnosis (2026-11-14):
 
 - Developer app created (Development mode), Web API selected, dedicated
   account allowlisted under User Management, publisher OAuth consent

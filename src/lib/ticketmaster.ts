@@ -23,6 +23,83 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+export interface TourEvent {
+  eventDate: string;
+  venue: string;
+  city: string;
+  region: string;
+  country: string;
+  ticketmasterEventId: string;
+  /** Attraction names in playing order (opener first). */
+  lineup: string[];
+  attractionCount: number;
+}
+
+function playingOrder(names: string[], artistName: string): string[] {
+  const lower = artistName.toLowerCase();
+  const headliner = names.find((n) => n.toLowerCase() === lower);
+  return headliner
+    ? [...names.filter((n) => n.toLowerCase() !== lower).reverse(), headliner]
+    : [...names].reverse();
+}
+
+/**
+ * Enumerate a headliner's upcoming tour events, deduplicated by
+ * date+city preferring the listing with the richest attraction data
+ * (Ticketmaster often returns duplicate sparse/full listings).
+ */
+export function parseTourEvents(data: unknown, artistName: string): TourEvent[] {
+  if (!isRecord(data)) return [];
+  const embedded = isRecord(data["_embedded"]) ? data["_embedded"] : {};
+  const byKey = new Map<string, TourEvent>();
+  for (const event of asArray(embedded["events"]).filter(isRecord)) {
+    const eventDate = eventLocalDate(event);
+    if (!eventDate) continue;
+    const evEmbedded = isRecord(event["_embedded"]) ? event["_embedded"] : {};
+    const names = asArray(evEmbedded["attractions"])
+      .filter(isRecord)
+      .map((a) => asString(a["name"]))
+      .filter(Boolean);
+    if (!names.some((n) => n.toLowerCase() === artistName.toLowerCase())) continue;
+    const venueData = asArray(evEmbedded["venues"]).filter(isRecord)[0] ?? {};
+    const cityObj = isRecord(venueData["city"]) ? venueData["city"] : {};
+    const stateObj = isRecord(venueData["state"]) ? venueData["state"] : {};
+    const countryObj = isRecord(venueData["country"]) ? venueData["country"] : {};
+    const parsed: TourEvent = {
+      eventDate,
+      venue: asString(venueData["name"]),
+      city: asString(cityObj["name"]),
+      region: asString(stateObj["name"]),
+      country: asString(countryObj["name"]),
+      ticketmasterEventId: asString(event["id"]),
+      lineup: playingOrder(names, artistName),
+      attractionCount: names.length,
+    };
+    const key = `${eventDate}|${parsed.city.toLowerCase()}`;
+    const prev = byKey.get(key);
+    if (!prev || parsed.attractionCount > prev.attractionCount) byKey.set(key, parsed);
+  }
+  return [...byKey.values()].sort((a, b) => a.eventDate.localeCompare(b.eventDate));
+}
+
+export async function getTourEvents(
+  artistName: string,
+  apiKey: string,
+  fetchFn: FetchFn = fetch,
+): Promise<TourEvent[]> {
+  const params = new URLSearchParams({
+    keyword: artistName,
+    classificationName: "music",
+    size: "100",
+    sort: "date,asc",
+    apikey: apiKey,
+  });
+  const resp = await fetchFn(`${BASE}/events.json?${params.toString()}`);
+  if (resp.status === 401) throw new Error("Invalid Ticketmaster API key.");
+  if (!resp.ok) throw new Error(`Ticketmaster returned HTTP ${resp.status}`);
+  return parseTourEvents(await resp.json(), artistName);
+}
+
 function eventLocalDate(event: Record<string, unknown>): string {
   const dates = isRecord(event["dates"]) ? event["dates"] : {};
   const start = isRecord(dates["start"]) ? dates["start"] : {};
@@ -68,17 +145,8 @@ export function parseLineup(
       .filter(Boolean)
       .join(", ");
 
-    // Ticketmaster lists attractions in billing order (headliner, then
-    // biggest support, down to opener). Playing order is the reverse:
-    // opener first, headliner last.
     const lower = artistName.toLowerCase();
-    const headliner = names.find((n) => n.toLowerCase() === lower);
-    const lineup = headliner
-      ? [
-          ...names.filter((n) => n.toLowerCase() !== lower).reverse(),
-          headliner,
-        ]
-      : [...names].reverse();
+    const lineup = playingOrder(names, artistName);
 
     const eventName = asString(event["name"]);
     let tourName = "";

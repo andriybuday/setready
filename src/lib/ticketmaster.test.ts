@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLineup } from "./ticketmaster";
+import { parseLineup, parseTourEvents } from "./ticketmaster";
 
 const response = {
   _embedded: {
@@ -43,6 +43,28 @@ describe("parseLineup playing order", () => {
       "In Flames",
       "Trivium",
     ]);
+  });
+});
+
+describe("parseTourEvents", () => {
+  it("dedupes same date+city keeping the richest attraction listing", () => {
+    const ev = (id: string, attractions: string[]) => ({
+      id,
+      dates: { start: { localDate: "2026-12-03" } },
+      _embedded: {
+        attractions: attractions.map((name) => ({ name })),
+        venues: [{ name: "Pearl", city: { name: "Las Vegas" }, state: { name: "Nevada" } }],
+      },
+    });
+    const data = {
+      _embedded: {
+        events: [ev("sparse", ["Trivium"]), ev("full", ["Trivium", "In Flames", "Frozen Soul", "Orbit Culture"])],
+      },
+    };
+    const out = parseTourEvents(data, "Trivium");
+    expect(out).toHaveLength(1);
+    expect(out[0]?.ticketmasterEventId).toBe("full");
+    expect(out[0]?.lineup).toEqual(["Orbit Culture", "Frozen Soul", "In Flames", "Trivium"]);
   });
 });
 

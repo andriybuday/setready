@@ -95,7 +95,9 @@ describe("playlistDescription", () => {
         {
           slug: "trivium-2026-12-08",
           event_date: "2026-12-08",
-          venue: "UBC - Doug Mitchell Thunderbird Sports Centre, Vancouver, British Columbia",
+          venue: "UBC - Doug Mitchell Thunderbird Sports Centre",
+          city: "Vancouver",
+          confidence: "confirmed",
         },
       ],
     });
@@ -103,7 +105,7 @@ describe("playlistDescription", () => {
     expect(d).toContain("real setlists");
     expect(d).toContain("sourced from setlist.fm");
     expect(d).toContain("Frozen Soul → Orbit Culture → In Flames → Trivium");
-    expect(d).toContain("• 2026-12-08 — UBC - Doug Mitchell");
+    expect(d).toContain("• 2026-12-08 — Vancouver · UBC - Doug Mitchell");
     expect(d).toContain("not a guarantee");
     expect(d).not.toContain("verified");
   });

@@ -1,5 +1,8 @@
 import type { Env } from "./env";
 import { publishShowToYouTube, publishTourToYouTube } from "./lib/publish";
+import { publishShowToSpotify, publishTourToSpotify } from "./lib/publishSpotify";
+import { syncTourDescriptions } from "./lib/syncDescriptions";
+import { importTourStops, listTourStops } from "./lib/tours";
 import { getMostRecentSetlist, searchArtists } from "./lib/setlistfm";
 import { buildShow } from "./lib/shows";
 import { homePage, showPage } from "./ui";
@@ -259,6 +262,20 @@ async function handle(request: Request, env: Env): Promise<Response> {
       });
     }
 
+    const spotifyShowMatch = /^\/api\/shows\/([^/]+)\/publish\/spotify$/.exec(url.pathname);
+    if (spotifyShowMatch && request.method === "POST") {
+      if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) {
+        return json({ error: "spotify_not_configured" }, 503);
+      }
+      const result = await publishShowToSpotify(
+        env.DB,
+        decodeURIComponent(spotifyShowMatch[1] as string),
+        env.SPOTIFY_CLIENT_ID,
+        env.SPOTIFY_CLIENT_SECRET,
+      );
+      return json({ ok: true, ...result });
+    }
+
     // Publish a saved show as the canonical public YouTube/YTM playlist.
     const publishMatch = /^\/api\/shows\/([^/]+)\/publish\/youtube$/.exec(url.pathname);
     if (publishMatch && request.method === "POST") {
@@ -270,6 +287,55 @@ async function handle(request: Request, env: Env): Promise<Response> {
         decodeURIComponent(publishMatch[1] as string),
         env.GOOGLE_OAUTH_CLIENT_ID,
         env.GOOGLE_OAUTH_CLIENT_SECRET,
+      );
+      return json({ ok: true, ...result });
+    }
+
+    const importStopsMatch = /^\/api\/tours\/([^/]+)\/import-stops$/.exec(url.pathname);
+    if (importStopsMatch && request.method === "POST") {
+      if (!env.TICKETMASTER_API_KEY) {
+        return json({ error: "ticketmaster_not_configured" }, 503);
+      }
+      const tourSlug = decodeURIComponent(importStopsMatch[1] as string);
+      const tour = await env.DB.prepare("SELECT id FROM tours WHERE slug = ?")
+        .bind(tourSlug)
+        .first<{ id: number }>();
+      if (!tour) return json({ error: "tour_not_found" }, 404);
+      const summary = await importTourStops(env.DB, tour.id, env.TICKETMASTER_API_KEY);
+      return json({ ok: true, tourSlug, ...summary, stops: await listTourStops(env.DB, tour.id) });
+    }
+
+    const syncDescMatch = /^\/api\/tours\/([^/]+)\/sync-descriptions$/.exec(url.pathname);
+    if (syncDescMatch && request.method === "POST") {
+      if (
+        !env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET ||
+        !env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET
+      ) {
+        return json({ error: "publisher_credentials_not_configured" }, 503);
+      }
+      const result = await syncTourDescriptions(
+        env.DB,
+        decodeURIComponent(syncDescMatch[1] as string),
+        {
+          googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+          googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+          spotifyClientId: env.SPOTIFY_CLIENT_ID,
+          spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+        },
+      );
+      return json({ ok: true, ...result });
+    }
+
+    const tourSpotifyMatch = /^\/api\/tours\/([^/]+)\/publish\/spotify$/.exec(url.pathname);
+    if (tourSpotifyMatch && request.method === "POST") {
+      if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) {
+        return json({ error: "spotify_not_configured" }, 503);
+      }
+      const result = await publishTourToSpotify(
+        env.DB,
+        decodeURIComponent(tourSpotifyMatch[1] as string),
+        env.SPOTIFY_CLIENT_ID,
+        env.SPOTIFY_CLIENT_SECRET,
       );
       return json({ ok: true, ...result });
     }

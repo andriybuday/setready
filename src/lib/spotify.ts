@@ -127,29 +127,52 @@ export async function createPlaylist(
 
 export interface TrackHit {
   uri: string;
+  id: string;
   name: string;
   artists: string;
+  artistNames: string[];
+}
+
+export function parseSearchHits(data: unknown): TrackHit[] {
+  if (typeof data !== "object" || data === null) return [];
+  const tracks = (data as Record<string, unknown>)["tracks"];
+  if (typeof tracks !== "object" || tracks === null) return [];
+  const items = (tracks as Record<string, unknown>)["items"];
+  if (!Array.isArray(items)) return [];
+  return items.flatMap((raw) => {
+    const item = raw as Record<string, unknown>;
+    if (typeof item["uri"] !== "string" || typeof item["id"] !== "string") return [];
+    const artistNames = Array.isArray(item["artists"])
+      ? item["artists"]
+          .map((a) => (a as Record<string, unknown>)["name"])
+          .filter((n): n is string => typeof n === "string")
+      : [];
+    return [{
+      uri: item["uri"],
+      id: item["id"],
+      name: typeof item["name"] === "string" ? item["name"] : "",
+      artists: artistNames.join(", "),
+      artistNames,
+    }];
+  });
 }
 
 export function parseSearchHit(data: unknown): TrackHit | null {
-  if (typeof data !== "object" || data === null) return null;
-  const tracks = (data as Record<string, unknown>)["tracks"];
-  if (typeof tracks !== "object" || tracks === null) return null;
-  const items = (tracks as Record<string, unknown>)["items"];
-  if (!Array.isArray(items) || items.length === 0) return null;
-  const first = items[0] as Record<string, unknown>;
-  const artists = Array.isArray(first["artists"])
-    ? first["artists"]
-        .map((a) => (a as Record<string, unknown>)["name"])
-        .filter((n): n is string => typeof n === "string")
-        .join(", ")
-    : "";
-  if (typeof first["uri"] !== "string") return null;
-  return {
-    uri: first["uri"],
-    name: typeof first["name"] === "string" ? first["name"] : "",
-    artists,
-  };
+  return parseSearchHits(data)[0] ?? null;
+}
+
+export async function searchTracks(
+  accessToken: string,
+  artist: string,
+  title: string,
+  limit = 10,
+): Promise<TrackHit[]> {
+  const params = new URLSearchParams({
+    q: `artist:${artist} track:${title}`,
+    type: "track",
+    limit: String(limit),
+  });
+  return parseSearchHits(await api(accessToken, `/search?${params.toString()}`));
 }
 
 export async function searchTrack(
@@ -157,12 +180,26 @@ export async function searchTrack(
   artist: string,
   title: string,
 ): Promise<TrackHit | null> {
-  const params = new URLSearchParams({
-    q: `artist:${artist} track:${title}`,
-    type: "track",
-    limit: "1",
+  return (await searchTracks(accessToken, artist, title, 1))[0] ?? null;
+}
+
+export async function changePlaylistDetails(
+  accessToken: string,
+  playlistId: string,
+  details: { name: string; description: string },
+): Promise<void> {
+  const resp = await fetch(`${API}/playlists/${playlistId}`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ ...details, public: true }),
   });
-  return parseSearchHit(await api(accessToken, `/search?${params.toString()}`));
+  if (!resp.ok) {
+    const detail = (await resp.text()).slice(0, 300);
+    throw new Error(`Spotify change details failed: HTTP ${resp.status} ${detail}`);
+  }
 }
 
 /** Add up to 100 track URIs to a playlist. */

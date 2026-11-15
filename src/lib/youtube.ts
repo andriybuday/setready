@@ -180,6 +180,23 @@ export async function addPlaylistItem(
   throw lastErr;
 }
 
+/** Quota: 50 units. Update title/description of an existing playlist. */
+export async function updatePlaylist(
+  accessToken: string,
+  playlistId: string,
+  title: string,
+  description: string,
+): Promise<void> {
+  await api(accessToken, "/playlists?part=snippet,status", {
+    method: "PUT",
+    body: JSON.stringify({
+      id: playlistId,
+      snippet: { title, description },
+      status: { privacyStatus: "public" },
+    }),
+  });
+}
+
 export function playlistUrl(playlistId: string): string {
   return `https://www.youtube.com/playlist?list=${playlistId}`;
 }
