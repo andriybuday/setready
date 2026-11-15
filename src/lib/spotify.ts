@@ -98,11 +98,15 @@ async function api<T>(accessToken: string, path: string, init: RequestInit = {})
 export interface SpotifyProfile {
   id: string;
   displayName: string;
+  product: string;
 }
 
 export async function getMe(accessToken: string): Promise<SpotifyProfile> {
-  const data = await api<{ id: string; display_name?: string }>(accessToken, "/me");
-  return { id: data.id, displayName: data.display_name ?? "" };
+  const data = await api<{ id: string; display_name?: string; product?: string }>(
+    accessToken,
+    "/me",
+  );
+  return { id: data.id, displayName: data.display_name ?? "", product: data.product ?? "" };
 }
 
 /** Create a public playlist on the authorized (SetReady) account. */

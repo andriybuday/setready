@@ -8,6 +8,10 @@ const CSS = `
   h2 { font-size: 21px; margin: 28px 0 8px; }
   .tag { color: #b8b8b8; margin: 0 0 24px; }
   label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  select { width: 100%; background: #1d1d1d; color: #f2f2f2;
+    border: 1px solid #383838; border-radius: 6px; padding: 10px 12px; font: inherit; }
+  .fix { background: none; border: 0; color: #ff6b6b; padding: 0; margin: 0 0 0 8px;
+    font-size: 13px; font-weight: 600; cursor: pointer; }
   input, textarea { width: 100%; background: #1d1d1d; color: #f2f2f2;
     border: 1px solid #383838; border-radius: 6px; padding: 10px 12px; font: inherit; }
   button { background: #d92323; color: #fff; border: 0; border-radius: 6px;
@@ -45,6 +49,38 @@ const adminHeaders = () => ({ "x-admin-token": adminInput.value });
 ${script}</script></body></html>`;
 }
 
+export function tourPage(slug: string): string {
+  const body = `<div id="app"><p class="muted">Loading…</p></div>
+<p><a href="/">← All shows</a></p>`;
+  const script = `
+const slug = ${JSON.stringify(slug)};
+const app = document.getElementById("app");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+(async () => {
+  const r = await fetch("/api/tours/" + encodeURIComponent(slug));
+  const d = await r.json();
+  if (!r.ok) { app.innerHTML = "<p>Failed: " + esc(d.message || d.error) + "</p>"; return; }
+  let html = "<h2>" + esc(d.tour.title) + "</h2>";
+  html += "<p class=muted>Playing order: " + d.bands.map(esc).join(" → ") + "</p>";
+  if (d.playlists.length) {
+    html += "<p>" + d.playlists.map(p =>
+      '<a href="' + esc(p.service === "spotify" ? p.external_url : "https://music.youtube.com/playlist?list=" + p.external_playlist_id) + '">' +
+      (p.service === "spotify" ? "Open in Spotify" : "Open in YouTube Music") + "</a>").join(" · ") + "</p>";
+  }
+  html += "<h2>Stops with this lineup (" + d.stops.length + ")</h2><ul>";
+  for (const s of d.stops) {
+    const built = d.builtByDate[s.event_date];
+    html += "<li>" + esc(s.event_date) + " — " + esc(s.city || "") +
+      (s.venue ? " · " + esc(s.venue) : "") +
+      (built ? ' · <a href="/shows/' + encodeURIComponent(built) + '">show page</a>' : "") +
+      (s.confidence === "inferred" ? ' <span class="tape">(lineup inferred)</span>' : "") + "</li>";
+  }
+  html += "</ul>";
+  app.innerHTML = html;
+})();`;
+  return shell("Tour", body, script);
+}
+
 export function homePage(): string {
   const body = `
 <form id="build">
@@ -54,13 +90,27 @@ export function homePage(): string {
   <input id="date" type="date" required>
   <label for="bands">Bands (optional — one per line, support first, headliner last; blank = Ticketmaster lookup)</label>
   <textarea id="bands" rows="4" placeholder="In Flames&#10;Trivium"></textarea>
+  <label for="mode">Setlist source</label>
+  <select id="mode">
+    <option value="predicted">Predicted — stats from last 5 shows</option>
+    <option value="last_show">Last show — copy most recent setlist</option>
+    <option value="actual">Actual — exact setlist for this date (after the show)</option>
+  </select>
   <button id="go" type="submit">Fetch setlists</button>
   <p class="msg" id="msg"></p>
 </form>
 <h2>Saved shows</h2>
-<ul class="shows" id="shows"><li class="muted">Loading…</li></ul>`;
+<ul class="shows" id="shows"><li class="muted">Loading…</li></ul>
+<h2>Tours</h2>
+<ul class="shows" id="tours"><li class="muted">Loading…</li></ul>`;
   const script = `
 const $ = (id) => document.getElementById(id);
+fetch("/api/tours").then(r => r.json()).then(({ tours }) => {
+  $("tours").innerHTML = tours.length
+    ? tours.map(t => '<li><a href="/tours/' + encodeURIComponent(t.slug) + '">' +
+        t.title + "</a> <span class=muted>" + t.stops + " stops</span></li>").join("")
+    : '<li class="muted">None yet.</li>';
+}).catch(() => { $("tours").innerHTML = '<li class="muted">Unavailable.</li>'; });
 fetch("/api/shows").then(r => r.json()).then(({ shows }) => {
   $("shows").innerHTML = shows.length
     ? shows.map(s => '<li><a href="/shows/' + encodeURIComponent(s.slug) + '">' +
@@ -75,6 +125,7 @@ $("build").addEventListener("submit", async (e) => {
     const r = await fetch("/api/shows/build", {
       method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
       body: JSON.stringify({ headliner: $("headliner").value, date: $("date").value,
+        mode: $("mode").value,
         bands: bands.length ? bands : undefined }),
     });
     const data = await r.json();
@@ -116,11 +167,21 @@ async function load() {
       html += '<p class="src">Based on ' + esc(b.source_setlist_date || "") +
         ' · <a href="' + esc(b.source_setlist_url) + '">source setlist</a></p>';
     for (const s of b.songs) {
+      const pct = s.probability != null ? ' <span class="tape">' + Math.round(s.probability * 100) + "%</span>" : "";
+      const matchBits = ["youtube", "spotify"].map((svc) => {
+        const m = s.matches && s.matches[svc];
+        const label = svc === "youtube" ? "YT" : "SP";
+        const text = m ? (m.status === "matched" ? esc(m.matched_title || "matched") : "no match") : "not matched yet";
+        return label + ": " + text +
+          ' <button type="button" class="fix" data-fix="' + svc + '" data-song="' + s.id +
+          '" data-artist="' + esc(s.matchArtist || b.name) + '" data-title="' + esc(s.title) + '">fix</button>';
+      }).join(" · ");
       html += '<label class="song"><input type="checkbox" data-id="' + s.id + '"' +
         (s.included && !s.is_tape ? " checked" : "") + (s.is_tape ? " disabled" : "") + ">" +
-        "<span>" + esc(s.title) +
+        "<span>" + esc(s.title) + pct +
         (s.original_artist ? ' <span class="tape">(cover: ' + esc(s.original_artist) + ")</span>" : "") +
-        (s.is_tape ? ' <span class="tape">(tape)</span>' : "") + "</span></label>";
+        (s.is_tape ? ' <span class="tape">(tape)</span>' : "") +
+        '<br><span class="tape">' + matchBits + "</span></span></label>";
     }
     html += "</div>";
   }
@@ -134,6 +195,33 @@ async function load() {
       : "") +
     '<p class="msg" id="msg"></p>';
   app.innerHTML = html;
+  for (const btn of document.querySelectorAll("button[data-fix]")) {
+    btn.onclick = async (e) => {
+      e.preventDefault();
+      const service = btn.dataset.fix, artist = btn.dataset.artist, title = btn.dataset.title;
+      const msg = document.getElementById("msg");
+      try {
+        const r = await fetch("/api/match/candidates", {
+          method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
+          body: JSON.stringify({ service, artist, title }) });
+        const d2 = await r.json();
+        if (!r.ok) throw new Error(d2.message || d2.error);
+        if (!d2.candidates.length) { msg.textContent = "No candidates for " + title; return; }
+        const list = d2.candidates.map((c, i) => (i + 1) + ". " + c.title + " [" + c.channelTitle + "]").join("\\n");
+        const pick = prompt("Pick a match for " + artist + " – " + title + " (" + service + "):\\n" + list, "1");
+        const idx = Number(pick) - 1;
+        if (!d2.candidates[idx]) return;
+        const c = d2.candidates[idx];
+        const r2 = await fetch("/api/match/override", {
+          method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
+          body: JSON.stringify({ service, artist, title, trackId: c.id, trackUri: c.uri,
+            matchedTitle: c.title, matchedArtist: artist }) });
+        if (!r2.ok) throw new Error("override failed");
+        msg.textContent = "Match saved. Republish to apply it to the playlist.";
+        load();
+      } catch (err) { msg.textContent = "Fix failed: " + err.message; }
+    };
+  }
   const save = async () => {
     const ids = [...document.querySelectorAll("input[data-id]:checked")].map(i => Number(i.dataset.id));
     const r = await fetch("/api/shows/" + encodeURIComponent(slug) + "/selection", {

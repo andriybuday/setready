@@ -1,12 +1,16 @@
+import { adminHealth } from "./lib/adminHealth";
+import { runDailyAutomation } from "./lib/automation";
 import { authorizeAdmin, requiresAdmin } from "./lib/auth";
 import type { Env } from "./env";
 import { publishShowToYouTube, publishTourToYouTube } from "./lib/publish";
 import { publishShowToSpotify, publishTourToSpotify } from "./lib/publishSpotify";
 import { syncTourDescriptions } from "./lib/syncDescriptions";
 import { importTourStops, listTourStops } from "./lib/tours";
+import { normalizeName } from "./lib/normalize";
 import { getMostRecentSetlist, searchArtists } from "./lib/setlistfm";
 import { buildShow } from "./lib/shows";
-import { homePage, showPage } from "./ui";
+import { handleMcp } from "./lib/mcp";
+import { homePage, showPage, tourPage } from "./ui";
 import * as spotify from "./lib/spotify";
 import { getLineup } from "./lib/ticketmaster";
 import {
@@ -17,6 +21,7 @@ import {
   musicPlaylistUrl,
   playlistUrl,
   searchFirstVideo,
+  searchVideos,
   youtubeAuthUrl,
 } from "./lib/youtube";
 
@@ -241,13 +246,16 @@ async function handle(request: Request, env: Env): Promise<Response> {
         headliner?: string;
         date?: string;
         bands?: string[];
+        mode?: string;
       };
       if (!body.headliner || !body.date) {
         return json({ error: "headliner_and_date_required" }, 400);
       }
+      const mode =
+        body.mode === "predicted" || body.mode === "actual" ? body.mode : "last_show";
       const built = await buildShow(
         env.DB,
-        { headliner: body.headliner, date: body.date, bands: body.bands },
+        { headliner: body.headliner, date: body.date, bands: body.bands, mode },
         { setlistfm: env.SETLISTFM_API_KEY, ticketmaster: env.TICKETMASTER_API_KEY },
       );
       return json({
@@ -266,6 +274,134 @@ async function handle(request: Request, env: Env): Promise<Response> {
           suggestions: b.suggestions,
         })),
       });
+    }
+
+    if (url.pathname === "/mcp" && request.method === "POST") {
+      const body = (await request.json()) as Record<string, unknown>;
+      const auth = authorizeAdmin(request, env.ADMIN_TOKEN);
+      const result = await handleMcp(body, env, auth.ok);
+      return result.payload === null
+        ? new Response(null, { status: result.status })
+        : json(result.payload, result.status);
+    }
+
+    if (url.pathname === "/api/tours" && request.method === "GET") {
+      const { results } = await env.DB.prepare(
+        `SELECT t.slug, t.title, t.tour_name,
+                (SELECT COUNT(*) FROM (
+                   SELECT event_date FROM tour_stops WHERE tour_id = t.id
+                   UNION
+                   SELECT event_date FROM shows WHERE tour_id = t.id
+                 )) AS stops
+           FROM tours t ORDER BY t.updated_at DESC`,
+      ).all();
+      return json({ tours: results });
+    }
+
+    const tourDetailMatch = /^\/api\/tours\/([^/]+)$/.exec(url.pathname);
+    if (tourDetailMatch && request.method === "GET") {
+      const tourSlug = decodeURIComponent(tourDetailMatch[1] as string);
+      const tour = await env.DB.prepare(
+        "SELECT id, slug, title, tour_name FROM tours WHERE slug = ?",
+      ).bind(tourSlug).first<{ id: number; slug: string; title: string; tour_name: string }>();
+      if (!tour) return json({ error: "tour_not_found" }, 404);
+      const { results: bands } = await env.DB.prepare(
+        `SELECT a.name FROM tour_artists ta JOIN artists a ON a.id = ta.artist_id
+          WHERE ta.tour_id = ? ORDER BY ta.position`,
+      ).bind(tour.id).all<{ name: string }>();
+      const { results: built } = await env.DB.prepare(
+        "SELECT slug, event_date FROM shows WHERE tour_id = ?",
+      ).bind(tour.id).all<{ slug: string; event_date: string }>();
+      const { results: playlists } = await env.DB.prepare(
+        "SELECT DISTINCT service, external_playlist_id, external_url, title FROM published_playlists WHERE tour_id = ?",
+      ).bind(tour.id).all();
+      return json({
+        tour,
+        bands: bands.map((b) => b.name),
+        stops: await listTourStops(env.DB, tour.id),
+        builtByDate: Object.fromEntries(built.map((s) => [s.event_date, s.slug])),
+        playlists,
+      });
+    }
+
+    if (url.pathname === "/api/admin/health" && request.method === "GET") {
+      const auth = authorizeAdmin(request, env.ADMIN_TOKEN);
+      if (!auth.ok) return json({ error: auth.error }, auth.status);
+      return json(await adminHealth(env.DB, {
+        googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+        googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+        spotifyClientId: env.SPOTIFY_CLIENT_ID,
+        spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+      }));
+    }
+
+    if (url.pathname === "/api/admin/run-automation" && request.method === "POST") {
+      const summary = await runDailyAutomation(env.DB, {
+        setlistfm: env.SETLISTFM_API_KEY,
+        ticketmaster: env.TICKETMASTER_API_KEY,
+        googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+        googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+        spotifyClientId: env.SPOTIFY_CLIENT_ID,
+        spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+      });
+      return json({ ok: true, ...summary });
+    }
+
+    if (url.pathname === "/api/match/candidates" && request.method === "POST") {
+      const body = (await request.json()) as { service?: string; artist?: string; title?: string };
+      if (!body.artist || !body.title || (body.service !== "youtube" && body.service !== "spotify")) {
+        return json({ error: "service_artist_title_required" }, 400);
+      }
+      const cred = await env.DB.prepare(
+        "SELECT refresh_token FROM oauth_credentials WHERE service = ?",
+      ).bind(body.service).first<{ refresh_token: string }>();
+      if (!cred) return json({ error: "publisher_not_connected" }, 409);
+      if (body.service === "youtube") {
+        if (!env.GOOGLE_OAUTH_CLIENT_ID || !env.GOOGLE_OAUTH_CLIENT_SECRET) {
+          return json({ error: "google_oauth_not_configured" }, 503);
+        }
+        const access = await accessTokenFromRefresh(
+          cred.refresh_token, env.GOOGLE_OAUTH_CLIENT_ID, env.GOOGLE_OAUTH_CLIENT_SECRET,
+        );
+        const candidates = await searchVideos(access, `${body.artist} ${body.title}`, 10);
+        return json({ candidates: candidates.map((c) => ({ id: c.videoId, uri: null, title: c.title, channelTitle: c.channelTitle })) });
+      }
+      if (!env.SPOTIFY_CLIENT_ID || !env.SPOTIFY_CLIENT_SECRET) {
+        return json({ error: "spotify_not_configured" }, 503);
+      }
+      const { accessToken } = await spotify.accessTokenFromRefresh(
+        cred.refresh_token, env.SPOTIFY_CLIENT_ID, env.SPOTIFY_CLIENT_SECRET,
+      );
+      const candidates = await spotify.searchTracks(accessToken, body.artist, body.title, 10);
+      return json({ candidates: candidates.map((c) => ({ id: c.id, uri: c.uri, title: c.name, channelTitle: c.artists })) });
+    }
+
+    if (url.pathname === "/api/match/override" && request.method === "POST") {
+      const body = (await request.json()) as {
+        service?: string; artist?: string; title?: string;
+        trackId?: string; trackUri?: string | null;
+        matchedTitle?: string; matchedArtist?: string;
+      };
+      if (!body.artist || !body.title || !body.trackId || (body.service !== "youtube" && body.service !== "spotify")) {
+        return json({ error: "service_artist_title_track_required" }, 400);
+      }
+      await env.DB.prepare(
+        `INSERT INTO track_matches
+           (service, artist_normalized, title_normalized, status,
+            service_track_id, service_track_uri, matched_title, matched_artist, confidence)
+         VALUES (?, ?, ?, 'matched', ?, ?, ?, ?, 1)
+         ON CONFLICT(service, artist_normalized, title_normalized) DO UPDATE SET
+           status = 'matched', service_track_id = excluded.service_track_id,
+           service_track_uri = excluded.service_track_uri,
+           matched_title = excluded.matched_title,
+           matched_artist = excluded.matched_artist,
+           confidence = 1, updated_at = datetime('now')`,
+      ).bind(
+        body.service, normalizeName(body.artist), normalizeName(body.title),
+        body.trackId, body.trackUri ?? null,
+        body.matchedTitle ?? null, body.matchedArtist ?? body.artist,
+      ).run();
+      return json({ ok: true });
     }
 
     const spotifyShowMatch = /^\/api\/shows\/([^/]+)\/publish\/spotify$/.exec(url.pathname);
@@ -388,14 +524,30 @@ async function handle(request: Request, env: Env): Promise<Response> {
           source_setlist_date: string | null; source_setlist_url: string | null;
         }>();
       const { results: songRows } = await env.DB.prepare(
-        `SELECT id, artist_id, position, title, original_artist, is_tape, included
+        `SELECT id, artist_id, position, title, normalized_title, original_artist,
+                is_tape, included, probability
            FROM songs WHERE show_id = ? ORDER BY position`,
       )
         .bind(show.id)
         .all<{
           id: number; artist_id: number; position: number; title: string;
+          normalized_title: string;
           original_artist: string | null; is_tape: number; included: number;
+          probability: number | null;
         }>();
+      const artistNameById = new Map(bandRows.map((b) => [b.artist_id, b.name]));
+      const { results: matchRows } = await env.DB.prepare(
+        `SELECT service, artist_normalized, title_normalized, status,
+                service_track_id, matched_title, confidence
+           FROM track_matches`,
+      ).all<{
+        service: string; artist_normalized: string; title_normalized: string;
+        status: string; service_track_id: string | null;
+        matched_title: string | null; confidence: number | null;
+      }>();
+      const matchByKey = new Map(
+        matchRows.map((m) => [`${m.service}|${m.artist_normalized}|${m.title_normalized}`, m]),
+      );
       const { results: playlists } = await env.DB.prepare(
         `SELECT service, external_playlist_id, external_url, title, tour_id
            FROM published_playlists
@@ -407,7 +559,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
         show,
         bands: bandRows.map((b) => ({
           ...b,
-          songs: songRows.filter((s) => s.artist_id === b.artist_id),
+          songs: songRows
+            .filter((s) => s.artist_id === b.artist_id)
+            .map((s) => {
+              const matchArtistName = s.original_artist ?? artistNameById.get(s.artist_id) ?? "";
+              const key = (service: string) =>
+                `${service}|${normalizeName(matchArtistName)}|${s.normalized_title}`;
+              return {
+                ...s,
+                matchArtist: matchArtistName,
+                matches: {
+                  youtube: matchByKey.get(key("youtube")) ?? null,
+                  spotify: matchByKey.get(key("spotify")) ?? null,
+                },
+              };
+            }),
         })),
         playlists,
       });
@@ -450,6 +616,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
       });
     }
 
+    const tourPageMatch = /^\/tours\/([^/]+)$/.exec(url.pathname);
+    if (tourPageMatch) {
+      return new Response(tourPage(decodeURIComponent(tourPageMatch[1] as string)), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
     const pageMatch = /^\/shows\/([^/]+)$/.exec(url.pathname);
     if (pageMatch) {
       return new Response(showPage(decodeURIComponent(pageMatch[1] as string)), {
@@ -470,5 +643,17 @@ export default {
       console.error(message);
       return json({ error: "upstream_or_internal", message }, 502);
     }
+  },
+  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(
+      runDailyAutomation(env.DB, {
+        setlistfm: env.SETLISTFM_API_KEY,
+        ticketmaster: env.TICKETMASTER_API_KEY,
+        googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+        googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+        spotifyClientId: env.SPOTIFY_CLIENT_ID,
+        spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+      }).then((s) => console.log("automation", JSON.stringify(s))),
+    );
   },
 } satisfies ExportedHandler<Env>;

@@ -253,6 +253,17 @@ export async function updatePlaylist(
   });
 }
 
+/** Quota: 1 unit. Identity of the authorized publisher channel. */
+export async function getMyChannel(
+  accessToken: string,
+): Promise<{ id: string; title: string } | null> {
+  const data = await api<{
+    items?: Array<{ id?: string; snippet?: { title?: string } }>;
+  }>(accessToken, "/channels?part=snippet&mine=true");
+  const item = data.items?.[0];
+  return item?.id ? { id: item.id, title: item.snippet?.title ?? "" } : null;
+}
+
 export function playlistUrl(playlistId: string): string {
   return `https://www.youtube.com/playlist?list=${playlistId}`;
 }

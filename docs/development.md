@@ -24,3 +24,22 @@ variable names. `npm run typecheck` and `npm test` are the local gates.
 
 The Worker starts on a free `workers.dev` address; a custom domain is a
 later, optional step.
+
+## Custom domain (owner purchase required)
+
+1. Buy/register the domain (e.g. via Cloudflare Registrar) and add it as
+   a zone in the same Cloudflare account.
+2. Workers & Pages -> setready -> Settings -> Domains & Routes ->
+   Custom Domain, e.g. `app.example.com`.
+3. Update OAuth redirect URIs to the new host in Google
+   (https://console.cloud.google.com/auth/clients?project=setready-514803)
+   and Spotify (https://developer.spotify.com/dashboard), keeping the
+   `127.0.0.1` local entries.
+
+## Automation and agents
+
+- Daily 09:15 UTC cron runs refresh/freeze/actual/republish-if-changed.
+  Manual trigger: `POST /api/admin/run-automation` (operator token).
+- Health: `GET /api/admin/health` (operator token).
+- MCP (stateless JSON-RPC): `POST /mcp`; `tools/list` is open,
+  `tools/call` requires the `x-admin-token` header.

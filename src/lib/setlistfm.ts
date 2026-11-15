@@ -129,6 +129,72 @@ export async function searchArtists(
   }
 }
 
+/** Up to `limit` most recent non-empty setlists strictly before beforeDate. */
+export async function getRecentSetlists(
+  artistName: string,
+  beforeDate: string,
+  apiKey: string,
+  limit = 5,
+  fetchFn: FetchFn = fetch,
+): Promise<RecentSetlist[]> {
+  const cutoff = cutoffNumber(beforeDate);
+  const out: RecentSetlist[] = [];
+  for (let page = 1; page <= 5 && out.length < limit; page++) {
+    const { status, data } = await getJson(
+      fetchFn,
+      "/search/setlists",
+      { artistName, p: String(page) },
+      apiKey,
+    );
+    if (status === 404 || !isRecord(data)) break;
+    const setlists = asArray(data["setlist"]);
+    if (setlists.length === 0) break;
+    for (const raw of setlists) {
+      if (!isRecord(raw)) continue;
+      const showDate = parseSetlistDate(asString(raw["eventDate"]));
+      if (showDate === null || showDate >= cutoff) continue;
+      const parsed = parseSetlist(raw);
+      if (parsed) out.push(parsed);
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+/** Exact setlist played on `date` (YYYY-MM-DD), for post-show actuals. */
+export async function getSetlistOnDate(
+  artistName: string,
+  date: string,
+  apiKey: string,
+  fetchFn: FetchFn = fetch,
+): Promise<RecentSetlist | null> {
+  const target = cutoffNumber(date);
+  for (let page = 1; page <= 3; page++) {
+    const { status, data } = await getJson(
+      fetchFn,
+      "/search/setlists",
+      { artistName, p: String(page) },
+      apiKey,
+    );
+    if (status === 404 || !isRecord(data)) return null;
+    const setlists = asArray(data["setlist"]);
+    if (setlists.length === 0) break;
+    let olderSeen = false;
+    for (const raw of setlists) {
+      if (!isRecord(raw)) continue;
+      const showDate = parseSetlistDate(asString(raw["eventDate"]));
+      if (showDate === null) continue;
+      if (showDate === target) {
+        const parsed = parseSetlist(raw);
+        if (parsed) return parsed;
+      }
+      if (showDate < target) olderSeen = true;
+    }
+    if (olderSeen) break; // results are date-descending; passed the target
+  }
+  return null;
+}
+
 /**
  * Most recent setlist strictly before `beforeDate` (YYYY-MM-DD).
  * Mirrors the setlistmaker prototype: max 3 search pages, skip empty

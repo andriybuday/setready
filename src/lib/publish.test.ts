@@ -128,11 +128,35 @@ describe("playlistDescription", () => {
 });
 
 describe("playlistTitle", () => {
-  it("matches the prototype naming convention", () => {
-    expect(playlistTitle(["Metallica"], "", "2026")).toBe("Metallica 2026");
-    expect(playlistTitle(["Mammoth WVH", "Metallica"], "M72 World Tour", "2026")).toBe(
-      "M72 World Tour — Mammoth WVH & Metallica 2026",
+  it("lists bands in billing order (headliner first) with the SetReady suffix", () => {
+    expect(playlistTitle(["Metallica"], "", "2026")).toBe(
+      "Metallica 2026 Setlist Playlist · SetReady",
     );
-    expect(playlistTitle(["A", "B", "C"], "", "2026")).toBe("A, B & C 2026");
+    // Input is playing order (support first); title reverses to billing.
+    expect(playlistTitle(["Mammoth WVH", "Metallica"], "M72 World Tour", "2026")).toBe(
+      "Metallica & Mammoth WVH — M72 World Tour 2026 Setlist Playlist · SetReady",
+    );
+  });
+
+  it("keeps the tour name by shortening generic words before dropping anything", () => {
+    const title = playlistTitle(
+      ["Frozen Soul", "Orbit Culture", "In Flames", "Trivium"],
+      "CROWN IN THE GRAVE WORLD TOUR",
+      "2026",
+    );
+    expect(title).toBe(
+      "Trivium + In Flames + Orbit Culture + Frozen Soul — Crown In The Grave 2026 Setlist · SetReady",
+    );
+    expect(title.length).toBeLessThanOrEqual(100);
+  });
+
+  it("never exceeds 100 chars even with many long band names", () => {
+    const title = playlistTitle(
+      ["The Extremely Long Band Name One", "Another Very Long Band Name Two", "Third Long Named Band"],
+      "An Extremely Long Tour Name That Goes On Forever",
+      "2026",
+    );
+    expect(title.length).toBeLessThanOrEqual(100);
+    expect(title.endsWith("Setlist Playlist · SetReady")).toBe(true);
   });
 });
