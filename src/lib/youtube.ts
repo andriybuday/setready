@@ -149,6 +149,60 @@ export async function searchFirstVideo(
   return first ? { videoId: first.videoId, title: first.title } : null;
 }
 
+export interface PlaylistItem {
+  itemId: string;
+  videoId: string;
+  position: number;
+}
+
+/** Quota: 1 unit per page. */
+export async function listPlaylistItems(
+  accessToken: string,
+  playlistId: string,
+): Promise<PlaylistItem[]> {
+  const items: PlaylistItem[] = [];
+  let pageToken = "";
+  for (;;) {
+    const params = new URLSearchParams({
+      part: "snippet",
+      playlistId,
+      maxResults: "50",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const data = await api<{
+      items?: Array<{
+        id?: string;
+        snippet?: { position?: number; resourceId?: { videoId?: string } };
+      }>;
+      nextPageToken?: string;
+    }>(accessToken, `/playlistItems?${params.toString()}`);
+    for (const it of data.items ?? []) {
+      if (it.id && it.snippet?.resourceId?.videoId) {
+        items.push({
+          itemId: it.id,
+          videoId: it.snippet.resourceId.videoId,
+          position: it.snippet.position ?? items.length,
+        });
+      }
+    }
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
+  }
+  return items.sort((a, b) => a.position - b.position);
+}
+
+/** Quota: 50 units. */
+export async function deletePlaylistItem(accessToken: string, itemId: string): Promise<void> {
+  const resp = await fetch(
+    `${YOUTUBE_API}/playlistItems?id=${encodeURIComponent(itemId)}`,
+    { method: "DELETE", headers: { authorization: `Bearer ${accessToken}` } },
+  );
+  if (!resp.ok) {
+    const detail = (await resp.text()).slice(0, 300);
+    throw new Error(`YouTube delete playlistItem failed: HTTP ${resp.status} ${detail}`);
+  }
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Quota: 50 units per item. Retries transient 409/5xx with backoff. */
@@ -156,6 +210,7 @@ export async function addPlaylistItem(
   accessToken: string,
   playlistId: string,
   videoId: string,
+  position?: number,
 ): Promise<void> {
   let lastErr: unknown;
   for (const delay of [0, 300, 900]) {
@@ -166,6 +221,7 @@ export async function addPlaylistItem(
         body: JSON.stringify({
           snippet: {
             playlistId,
+            ...(position !== undefined ? { position } : {}),
             resourceId: { kind: "youtube#video", videoId },
           },
         }),

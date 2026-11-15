@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database;
+  /** Operator token for mutating endpoints (secret). Fails closed if unset. */
+  ADMIN_TOKEN?: string;
   /** setlist.fm API key (secret). */
   SETLISTFM_API_KEY: string;
   /** Ticketmaster Discovery Consumer Key (secret). Optional feature. */

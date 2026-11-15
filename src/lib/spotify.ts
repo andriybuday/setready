@@ -202,6 +202,42 @@ export async function changePlaylistDetails(
   }
 }
 
+/** Current track URIs of a playlist, in order. */
+export async function getPlaylistUris(accessToken: string, playlistId: string): Promise<string[]> {
+  const uris: string[] = [];
+  let path: string | null = `/playlists/${playlistId}/items?limit=50`;
+  while (path) {
+    const data: { items?: Array<{ item?: { uri?: string }; track?: { uri?: string } }>; next?: string | null } =
+      await api(accessToken, path);
+    for (const it of data.items ?? []) {
+      const uri = it.item?.uri ?? it.track?.uri;
+      if (uri) uris.push(uri);
+    }
+    path = data.next ? data.next.replace(API, "") : null;
+  }
+  return uris;
+}
+
+/** Replace all items (first 100 URIs) of an existing playlist. */
+export async function replacePlaylistItems(
+  accessToken: string,
+  playlistId: string,
+  uris: string[],
+): Promise<void> {
+  const resp = await fetch(`${API}/playlists/${playlistId}/items`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ uris: uris.slice(0, 100) }),
+  });
+  if (!resp.ok) {
+    const detail = (await resp.text()).slice(0, 300);
+    throw new Error(`Spotify replace items failed: HTTP ${resp.status} ${detail}`);
+  }
+}
+
 /** Add up to 100 track URIs to a playlist. */
 export async function addPlaylistItems(
   accessToken: string,

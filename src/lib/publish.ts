@@ -101,6 +101,30 @@ export function playlistDescription(input: {
   ].join("\n");
 }
 
+/**
+ * Prefix-preserving sync plan for an existing playlist: keep the
+ * longest matching head, delete the divergent tail, insert the rest.
+ * Saves quota versus rebuilding when only rotations changed.
+ */
+export function planPlaylistSync(
+  existing: youtube.PlaylistItem[],
+  desiredVideoIds: string[],
+): { keep: number; deleteItemIds: string[]; insertVideoIds: string[] } {
+  let keep = 0;
+  while (
+    keep < existing.length &&
+    keep < desiredVideoIds.length &&
+    existing[keep]?.videoId === desiredVideoIds[keep]
+  ) {
+    keep += 1;
+  }
+  return {
+    keep,
+    deleteItemIds: existing.slice(keep).map((i) => i.itemId),
+    insertVideoIds: desiredVideoIds.slice(keep),
+  };
+}
+
 export interface PublishResult {
   playlistId: string;
   youtube: string;
@@ -111,6 +135,7 @@ export interface PublishResult {
   failed: Array<{ artist: string; title: string; error: string }>;
   fromCache: number;
   searched: number;
+  reusedPlaylist: boolean;
 }
 
 /**
@@ -245,22 +270,53 @@ export async function publishShowToYouTube(
     ? await listTourStops(db, show.tour_id)
     : [{ slug: show.slug, event_date: show.event_date, venue: show.venue, city: null, confidence: "confirmed" as const }];
   const displayTitle = overrides.title ?? show.title;
-  const playlist = await youtube.createPlaylist(
-    accessToken,
-    displayTitle,
-    playlistDescription({
-      tourName: overrides.tourName ?? show.tour_name ?? "",
-      bandsInPlayingOrder,
-      stops,
-    }),
-  );
+  const description = playlistDescription({
+    tourName: overrides.tourName ?? show.tour_name ?? "",
+    bandsInPlayingOrder,
+    stops,
+  });
+
+  // Reuse the canonical playlist when one exists for this tour/show so
+  // savers and links survive updates; reconcile its items in place.
+  const existingRow = await db
+    .prepare(
+      `SELECT external_playlist_id FROM published_playlists
+        WHERE service = 'youtube' AND (tour_id = ? OR show_id = ?)
+        ORDER BY (tour_id IS NOT NULL) DESC LIMIT 1`,
+    )
+    .bind(show.tour_id, show.id)
+    .first<{ external_playlist_id: string }>();
+
+  let playlistId: string | null = null;
+  let existingItems: youtube.PlaylistItem[] = [];
+  if (existingRow) {
+    try {
+      existingItems = await youtube.listPlaylistItems(accessToken, existingRow.external_playlist_id);
+      playlistId = existingRow.external_playlist_id;
+      await youtube.updatePlaylist(accessToken, playlistId, displayTitle, description);
+    } catch {
+      playlistId = null; // deleted externally — recreate below
+      existingItems = [];
+    }
+  }
+  const reusedPlaylist = playlistId !== null;
+  if (!playlistId) {
+    const created = await youtube.createPlaylist(accessToken, displayTitle, description);
+    playlistId = created.id;
+  }
+  const playlist = { id: playlistId };
+
+  const plan = planPlaylistSync(existingItems, entries.map((e) => e.videoId));
+  for (const itemId of [...plan.deleteItemIds].reverse()) {
+    await youtube.deletePlaylistItem(accessToken, itemId);
+  }
   // One bad item must not abort the whole publish after the playlist
   // exists; collect failures and report them.
   const failed: Array<{ artist: string; title: string; error: string }> = [];
-  let added = 0;
-  for (const entry of entries) {
+  let added = plan.keep;
+  for (const [i, entry] of entries.slice(plan.keep).entries()) {
     try {
-      await youtube.addPlaylistItem(accessToken, playlist.id, entry.videoId);
+      await youtube.addPlaylistItem(accessToken, playlist.id, entry.videoId, plan.keep + i);
       added += 1;
     } catch (err) {
       failed.push({
@@ -272,6 +328,15 @@ export async function publishShowToYouTube(
   }
 
   const url = youtube.playlistUrl(playlist.id);
+  // One canonical row per service for this tour/show, regardless of
+  // which stop was the representative when it was first published.
+  await db
+    .prepare(
+      `DELETE FROM published_playlists
+        WHERE service = 'youtube' AND (show_id = ? OR (tour_id IS NOT NULL AND tour_id = ?))`,
+    )
+    .bind(show.id, show.tour_id)
+    .run();
   await db
     .prepare(
       `INSERT INTO published_playlists
@@ -296,6 +361,7 @@ export async function publishShowToYouTube(
     failed,
     fromCache,
     searched,
+    reusedPlaylist,
   };
 }
 

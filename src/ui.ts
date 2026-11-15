@@ -34,8 +34,15 @@ function shell(title: string, body: string, script: string): string {
 <body><main>
 <h1>SetReady</h1>
 <p class="tag">Hear tonight's show before doors.</p>
+<label for="adminToken">Operator token (required to build/publish)</label>
+<input id="adminToken" type="password" autocomplete="off" placeholder="Stored only in this browser">
 ${body}
-</main><script>${script}</script></body></html>`;
+</main><script>
+const adminInput = document.getElementById("adminToken");
+adminInput.value = localStorage.getItem("setready_admin") || "";
+adminInput.addEventListener("change", () => localStorage.setItem("setready_admin", adminInput.value));
+const adminHeaders = () => ({ "x-admin-token": adminInput.value });
+${script}</script></body></html>`;
 }
 
 export function homePage(): string {
@@ -66,7 +73,7 @@ $("build").addEventListener("submit", async (e) => {
   const bands = $("bands").value.split("\\n").map(s => s.trim()).filter(Boolean);
   try {
     const r = await fetch("/api/shows/build", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
       body: JSON.stringify({ headliner: $("headliner").value, date: $("date").value,
         bands: bands.length ? bands : undefined }),
     });
@@ -130,7 +137,7 @@ async function load() {
   const save = async () => {
     const ids = [...document.querySelectorAll("input[data-id]:checked")].map(i => Number(i.dataset.id));
     const r = await fetch("/api/shows/" + encodeURIComponent(slug) + "/selection", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
       body: JSON.stringify({ includedSongIds: ids }) });
     if (!r.ok) throw new Error("save failed");
   };
@@ -145,7 +152,7 @@ async function load() {
       const base = d.show.tour_slug
         ? "/api/tours/" + encodeURIComponent(d.show.tour_slug)
         : "/api/shows/" + encodeURIComponent(slug);
-      const r = await fetch(base + "/publish/" + service, { method: "POST" });
+      const r = await fetch(base + "/publish/" + service, { method: "POST", headers: adminHeaders() });
       const d2 = await r.json();
       if (!r.ok) throw new Error(d2.message || d2.error);
       const href = service === "spotify" ? d2.spotify : d2.youtubeMusic;
@@ -163,7 +170,7 @@ async function load() {
     const btn = e.target, msg = document.getElementById("msg");
     btn.disabled = true; msg.textContent = label + "…";
     try {
-      const r = await fetch("/api/tours/" + encodeURIComponent(d.show.tour_slug) + path, { method: "POST" });
+      const r = await fetch("/api/tours/" + encodeURIComponent(d.show.tour_slug) + path, { method: "POST", headers: adminHeaders() });
       const d2 = await r.json();
       if (!r.ok) throw new Error(d2.message || d2.error);
       msg.textContent = label + " done: " + JSON.stringify(

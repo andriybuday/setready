@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   chooseCandidate,
   matchArtist,
+  planPlaylistSync,
   playlistDescription,
   publishableSongs,
   type ShowSongRow,
@@ -83,6 +84,21 @@ describe("chooseCandidate", () => {
         new Set(),
       ),
     ).toBeNull();
+  });
+});
+
+describe("planPlaylistSync", () => {
+  const item = (videoId: string, position: number) => ({ itemId: `i-${videoId}`, videoId, position });
+
+  it("keeps a matching prefix, deletes the divergent tail, inserts the rest", () => {
+    const plan = planPlaylistSync([item("a", 0), item("b", 1), item("x", 2)], ["a", "b", "c", "d"]);
+    expect(plan).toEqual({ keep: 2, deleteItemIds: ["i-x"], insertVideoIds: ["c", "d"] });
+  });
+
+  it("is a no-op when sequences already match", () => {
+    expect(planPlaylistSync([item("a", 0)], ["a"])).toEqual({
+      keep: 1, deleteItemIds: [], insertVideoIds: [],
+    });
   });
 });
 

@@ -1,3 +1,4 @@
+import { authorizeAdmin, requiresAdmin } from "./lib/auth";
 import type { Env } from "./env";
 import { publishShowToYouTube, publishTourToYouTube } from "./lib/publish";
 import { publishShowToSpotify, publishTourToSpotify } from "./lib/publishSpotify";
@@ -37,6 +38,11 @@ interface ShowRow {
 
 async function handle(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    if (requiresAdmin(request)) {
+      const auth = authorizeAdmin(request, env.ADMIN_TOKEN);
+      if (!auth.ok) return json({ error: auth.error }, auth.status);
+    }
 
     if (url.pathname === "/health") {
       // Proves the D1 binding + migrations are live without leaking secrets.

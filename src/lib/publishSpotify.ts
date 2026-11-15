@@ -73,6 +73,7 @@ export interface SpotifyPublishResult {
   failed: Array<{ artist: string; title: string; error: string }>;
   fromCache: number;
   searched: number;
+  reusedPlaylist: boolean;
 }
 
 interface CachedMatch {
@@ -210,34 +211,85 @@ export async function publishShowToSpotify(
   const stops = show.tour_id
     ? await listTourStops(db, show.tour_id)
     : [{ slug: show.slug, event_date: show.event_date, venue: show.venue, city: null, confidence: "confirmed" as const }];
-  const playlist = await spotify.createPlaylist(
-    accessToken,
-    displayTitle,
-    spotifyDescription({
-      tourName: overrides.tourName ?? show.tour_name ?? "",
-      bandsInPlayingOrder,
-      stops,
-    }),
-  );
+  const description = spotifyDescription({
+    tourName: overrides.tourName ?? show.tour_name ?? "",
+    bandsInPlayingOrder,
+    stops,
+  });
+
+  // Reuse the canonical playlist when one exists so savers/links survive.
+  const existingRow = await db
+    .prepare(
+      `SELECT external_playlist_id, external_url FROM published_playlists
+        WHERE service = 'spotify' AND (tour_id = ? OR show_id = ?)
+        ORDER BY (tour_id IS NOT NULL) DESC LIMIT 1`,
+    )
+    .bind(show.tour_id, show.id)
+    .first<{ external_playlist_id: string; external_url: string }>();
+
+  let playlist: { id: string; url: string } | null = null;
+  let currentUris: string[] = [];
+  if (existingRow) {
+    try {
+      currentUris = await spotify.getPlaylistUris(accessToken, existingRow.external_playlist_id);
+      playlist = { id: existingRow.external_playlist_id, url: existingRow.external_url };
+      await spotify.changePlaylistDetails(accessToken, playlist.id, {
+        name: displayTitle,
+        description,
+      });
+    } catch {
+      playlist = null;
+      currentUris = [];
+    }
+  }
+  const reusedPlaylist = playlist !== null;
+  if (!playlist) {
+    playlist = await spotify.createPlaylist(accessToken, displayTitle, description);
+  }
 
   const failed: SpotifyPublishResult["failed"] = [];
   let added = 0;
-  // Spotify accepts up to 100 URIs per add call; chunk to be safe.
-  for (let i = 0; i < entries.length; i += 100) {
-    const chunk = entries.slice(i, i + 100);
+  const desiredUris = entries.map((e) => e.uri);
+  const unchanged =
+    desiredUris.length === currentUris.length &&
+    desiredUris.every((u, i) => u === currentUris[i]);
+  if (unchanged) {
+    added = desiredUris.length;
+  } else if (reusedPlaylist) {
     try {
-      await spotify.addPlaylistItems(
-        accessToken,
-        playlist.id,
-        chunk.map((e) => e.uri),
-      );
-      added += chunk.length;
+      await spotify.replacePlaylistItems(accessToken, playlist.id, desiredUris);
+      added = Math.min(100, desiredUris.length);
+      for (let i = 100; i < entries.length; i += 100) {
+        const chunk = entries.slice(i, i + 100);
+        await spotify.addPlaylistItems(accessToken, playlist.id, chunk.map((e) => e.uri));
+        added += chunk.length;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message.slice(0, 200) : String(err);
-      for (const e of chunk) failed.push({ artist: e.artist, title: e.title, error: message });
+      for (const e of entries) failed.push({ artist: e.artist, title: e.title, error: message });
+    }
+  } else {
+    for (let i = 0; i < entries.length; i += 100) {
+      const chunk = entries.slice(i, i + 100);
+      try {
+        await spotify.addPlaylistItems(accessToken, playlist.id, chunk.map((e) => e.uri));
+        added += chunk.length;
+      } catch (err) {
+        const message = err instanceof Error ? err.message.slice(0, 200) : String(err);
+        for (const e of chunk) failed.push({ artist: e.artist, title: e.title, error: message });
+      }
     }
   }
 
+  // One canonical row per service for this tour/show, regardless of
+  // which stop was the representative when it was first published.
+  await db
+    .prepare(
+      `DELETE FROM published_playlists
+        WHERE service = 'spotify' AND (show_id = ? OR (tour_id IS NOT NULL AND tour_id = ?))`,
+    )
+    .bind(show.id, show.tour_id)
+    .run();
   await db
     .prepare(
       `INSERT INTO published_playlists
@@ -261,6 +313,7 @@ export async function publishShowToSpotify(
     failed,
     fromCache,
     searched,
+    reusedPlaylist,
   };
 }
 
