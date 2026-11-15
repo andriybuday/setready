@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "setready",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "setready",
+      "database_id": "95ae3d5c-9f5e-4a62-8f60-a24f29cf4ed5",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
