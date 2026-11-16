@@ -93,15 +93,22 @@ async function getJson(
   apiKey: string,
 ): Promise<{ status: number; data: unknown }> {
   const url = `${BASE}${path}?${new URLSearchParams(params).toString()}`;
-  const resp = await fetchFn(url, {
-    headers: { "x-api-key": apiKey, accept: "application/json" },
-  });
-  if (resp.status === 404) return { status: 404, data: null };
-  if (resp.status === 429) {
-    throw new Error("setlist.fm rate limit hit — wait a moment and try again.");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resp = await fetchFn(url, {
+      headers: { "x-api-key": apiKey, accept: "application/json" },
+    });
+    if (resp.status === 404) return { status: 404, data: null };
+    if (resp.status === 429) {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw new Error("setlist.fm rate limit hit — wait a moment and try again.");
+    }
+    if (!resp.ok) throw new Error(`setlist.fm returned HTTP ${resp.status}`);
+    return { status: resp.status, data: await resp.json() };
   }
-  if (!resp.ok) throw new Error(`setlist.fm returned HTTP ${resp.status}`);
-  return { status: resp.status, data: await resp.json() };
+  throw new Error("setlist.fm rate limit hit — wait a moment and try again.");
 }
 
 /** "Did you mean?" artist suggestions for a name with no setlists. */

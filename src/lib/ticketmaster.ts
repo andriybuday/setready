@@ -25,6 +25,7 @@ function asString(v: unknown): string {
 
 export interface TourEvent {
   eventDate: string;
+  eventName: string;
   venue: string;
   city: string;
   region: string;
@@ -32,6 +33,8 @@ export interface TourEvent {
   ticketmasterEventId: string;
   /** Attraction names in playing order (opener first). */
   lineup: string[];
+  /** Billing order as listed (headliner first). */
+  billing: string[];
   attractionCount: number;
 }
 
@@ -48,7 +51,7 @@ function playingOrder(names: string[], artistName: string): string[] {
  * date+city preferring the listing with the richest attraction data
  * (Ticketmaster often returns duplicate sparse/full listings).
  */
-export function parseTourEvents(data: unknown, artistName: string): TourEvent[] {
+export function parseTourEvents(data: unknown, artistName = ""): TourEvent[] {
   if (!isRecord(data)) return [];
   const embedded = isRecord(data["_embedded"]) ? data["_embedded"] : {};
   const byKey = new Map<string, TourEvent>();
@@ -60,22 +63,26 @@ export function parseTourEvents(data: unknown, artistName: string): TourEvent[] 
       .filter(isRecord)
       .map((a) => asString(a["name"]))
       .filter(Boolean);
-    if (!names.some((n) => n.toLowerCase() === artistName.toLowerCase())) continue;
+    if (names.length === 0) continue;
+    if (artistName && !names.some((n) => n.toLowerCase() === artistName.toLowerCase())) continue;
+    const headliner = artistName || (names[0] as string);
     const venueData = asArray(evEmbedded["venues"]).filter(isRecord)[0] ?? {};
     const cityObj = isRecord(venueData["city"]) ? venueData["city"] : {};
     const stateObj = isRecord(venueData["state"]) ? venueData["state"] : {};
     const countryObj = isRecord(venueData["country"]) ? venueData["country"] : {};
     const parsed: TourEvent = {
       eventDate,
+      eventName: asString(event["name"]),
       venue: asString(venueData["name"]),
       city: asString(cityObj["name"]),
       region: asString(stateObj["name"]),
       country: asString(countryObj["name"]),
       ticketmasterEventId: asString(event["id"]),
-      lineup: playingOrder(names, artistName),
+      lineup: playingOrder(names, headliner),
+      billing: names,
       attractionCount: names.length,
     };
-    const key = `${eventDate}|${parsed.city.toLowerCase()}`;
+    const key = `${eventDate}|${parsed.city.toLowerCase()}|${(parsed.billing[0] ?? "").toLowerCase()}`;
     const prev = byKey.get(key);
     if (!prev || parsed.attractionCount > prev.attractionCount) byKey.set(key, parsed);
   }
@@ -98,6 +105,44 @@ export async function getTourEvents(
   if (resp.status === 401) throw new Error("Invalid Ticketmaster API key.");
   if (!resp.ok) throw new Error(`Ticketmaster returned HTTP ${resp.status}`);
   return parseTourEvents(await resp.json(), artistName);
+}
+
+/** All music events in a date window (up to maxPages x 200, deduped). */
+export async function getMusicEvents(
+  startDate: string,
+  endDate: string,
+  apiKey: string,
+  maxPages = 5,
+  fetchFn: FetchFn = fetch,
+): Promise<TourEvent[]> {
+  const all: TourEvent[] = [];
+  const seen = new Set<string>();
+  for (let page = 0; page < maxPages; page++) {
+    const params = new URLSearchParams({
+      classificationName: "music",
+      startDateTime: `${startDate}T00:00:00Z`,
+      endDateTime: `${endDate}T23:59:59Z`,
+      size: "200",
+      page: String(page),
+      sort: "date,asc",
+      apikey: apiKey,
+    });
+    const resp = await fetchFn(`${BASE}/events.json?${params.toString()}`);
+    if (resp.status === 401) throw new Error("Invalid Ticketmaster API key.");
+    if (!resp.ok) throw new Error(`Ticketmaster returned HTTP ${resp.status}`);
+    const batch = parseTourEvents(await resp.json(), "");
+    if (batch.length === 0) break;
+    for (const e of batch) {
+      const key = `${e.eventDate}|${e.city.toLowerCase()}|${(e.billing[0] ?? "").toLowerCase()}`;
+      if (seen.has(key)) continue;
+      // Drop season packages / venue passes / add-ons masquerading as events
+      const name = e.eventName.toLowerCase();
+      if (/package|pass\b|series pass|entry to all|premium\b/.test(name)) continue;
+      seen.add(key);
+      if (e.eventDate >= startDate && e.eventDate <= endDate) all.push(e);
+    }
+  }
+  return all.sort((a, b) => a.eventDate.localeCompare(b.eventDate));
 }
 
 function eventLocalDate(event: Record<string, unknown>): string {

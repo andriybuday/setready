@@ -10,6 +10,7 @@ import { normalizeName } from "./lib/normalize";
 import { getMostRecentSetlist, searchArtists } from "./lib/setlistfm";
 import { buildShow } from "./lib/shows";
 import { handleMcp } from "./lib/mcp";
+import { runPipeline } from "./lib/pipeline";
 import { homePage, showPage, tourPage } from "./ui";
 import * as spotify from "./lib/spotify";
 import { getLineup } from "./lib/ticketmaster";
@@ -335,6 +336,36 @@ async function handle(request: Request, env: Env): Promise<Response> {
       }));
     }
 
+    if (url.pathname === "/api/admin/candidates" && request.method === "GET") {
+      const auth = authorizeAdmin(request, env.ADMIN_TOKEN);
+      if (!auth.ok) return json({ error: auth.error }, auth.status);
+      const { results } = await env.DB.prepare(
+        `SELECT headliner, tour_name, bands_json, first_date, last_date,
+                events_count, score, status, reason, show_slug
+           FROM tour_candidates ORDER BY score DESC LIMIT 50`,
+      ).all();
+      return json({ candidates: results });
+    }
+
+    if (url.pathname === "/api/admin/pipeline/run" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as {
+        windowDays?: number; qualifyLimit?: number; publishLimit?: number; stage?: "full"|"discover"|"qualify"|"publish"|"tick";
+      };
+      const summary = await runPipeline(env.DB, {
+        setlistfm: env.SETLISTFM_API_KEY,
+        ticketmaster: env.TICKETMASTER_API_KEY,
+        googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+        googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+        spotifyClientId: env.SPOTIFY_CLIENT_ID,
+        spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+      }, new Date().toISOString().slice(0, 10), {
+        windowDays: body.windowDays,
+        qualifyLimit: body.qualifyLimit,
+        publishLimit: body.publishLimit, stage: body.stage,
+      });
+      return json({ ok: true, ...summary });
+    }
+
     if (url.pathname === "/api/admin/run-automation" && request.method === "POST") {
       const summary = await runDailyAutomation(env.DB, {
         setlistfm: env.SETLISTFM_API_KEY,
@@ -644,16 +675,27 @@ export default {
       return json({ error: "upstream_or_internal", message }, 502);
     }
   },
-  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    const keys = {
+      setlistfm: env.SETLISTFM_API_KEY,
+      ticketmaster: env.TICKETMASTER_API_KEY,
+      googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
+      googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+      spotifyClientId: env.SPOTIFY_CLIENT_ID,
+      spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
+    };
     ctx.waitUntil(
-      runDailyAutomation(env.DB, {
-        setlistfm: env.SETLISTFM_API_KEY,
-        ticketmaster: env.TICKETMASTER_API_KEY,
-        googleClientId: env.GOOGLE_OAUTH_CLIENT_ID,
-        googleClientSecret: env.GOOGLE_OAUTH_CLIENT_SECRET,
-        spotifyClientId: env.SPOTIFY_CLIENT_ID,
-        spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
-      }).then((s) => console.log("automation", JSON.stringify(s))),
+      (async () => {
+        if (controller.cron === "15 9 * * *") {
+          const daily = await runDailyAutomation(env.DB, keys);
+          console.log("automation", JSON.stringify(daily));
+        }
+        const pipeline = await runPipeline(
+          env.DB, keys, new Date().toISOString().slice(0, 10),
+          { windowDays: 14, qualifyLimit: 3, publishLimit: 1, stage: "tick" },
+        );
+        console.log("pipeline", JSON.stringify(pipeline));
+      })(),
     );
   },
 } satisfies ExportedHandler<Env>;

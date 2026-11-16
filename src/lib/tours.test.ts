@@ -18,8 +18,9 @@ describe("lineupFingerprint", () => {
 
 describe("classifyTourStops", () => {
   const ev = (eventDate: string, lineup: string[]): TourEvent => ({
-    eventDate, venue: "V", city: "C", region: "", country: "",
-    ticketmasterEventId: eventDate, lineup, attractionCount: lineup.length,
+    eventDate, eventName: "T", venue: "V", city: "C", region: "", country: "",
+    ticketmasterEventId: eventDate, lineup, billing: [...lineup].reverse(),
+    attractionCount: lineup.length,
   });
   const bands = ["Frozen Soul", "Orbit Culture", "In Flames", "Trivium"];
 

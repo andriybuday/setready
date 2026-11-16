@@ -54,7 +54,9 @@ export function spotifyDescription(input: {
   const first = input.stops[0];
   const last = input.stops[input.stops.length - 1];
   const range = first && last
-    ? `${input.stops.length} stops with this lineup: ${first.event_date} ${cityOf(first)} → ${last.event_date} ${cityOf(last)}. `
+    ? input.stops.length === 1
+      ? `Stop: ${first.event_date} ${cityOf(first)}. `
+      : `${input.stops.length} stops with this lineup: ${first.event_date} ${cityOf(first)} → ${last.event_date} ${cityOf(last)}. `
     : "";
   const text =
     `Hear the show before doors — every stop on this tour. ` +

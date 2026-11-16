@@ -156,8 +156,7 @@ export async function importTourStops(
   const bands = bandRows.map((b) => b.name);
   const events = await getTourEvents(headliner, ticketmasterKey);
   const stops = classifyTourStops(events, bands, headliner);
-  for (const s of stops) {
-    await db
+  await db.batch(stops.map((s) => db
       .prepare(
         `INSERT INTO tour_stops
            (tour_id, event_date, venue, city, region, country,
@@ -181,9 +180,7 @@ export async function importTourStops(
         s.ticketmasterEventId || null,
         JSON.stringify(s.lineup),
         s.confidence,
-      )
-      .run();
-  }
+      )));
   return {
     imported: stops.length,
     confirmed: stops.filter((s) => s.confidence === "confirmed").length,

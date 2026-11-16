@@ -102,7 +102,12 @@ export function homePage(): string {
 <h2>Saved shows</h2>
 <ul class="shows" id="shows"><li class="muted">Loading…</li></ul>
 <h2>Tours</h2>
-<ul class="shows" id="tours"><li class="muted">Loading…</li></ul>`;
+<ul class="shows" id="tours"><li class="muted">Loading…</li></ul>
+<h2>Auto-discovery pipeline</h2>
+<p class="muted">Discovers upcoming tours, checks setlist evidence, builds and publishes qualifying ones (capped).</p>
+<button id="runPipe" class="secondary" style="margin-left:0">Run discovery + publish 1</button>
+<p class="msg" id="pipeMsg"></p>
+<ul class="shows" id="cands"><li class="muted">Enter operator token to load candidates.</li></ul>`;
   const script = `
 const $ = (id) => document.getElementById(id);
 fetch("/api/tours").then(r => r.json()).then(({ tours }) => {
@@ -116,6 +121,38 @@ fetch("/api/shows").then(r => r.json()).then(({ shows }) => {
     ? shows.map(s => '<li><a href="/shows/' + encodeURIComponent(s.slug) + '">' +
         s.title + "</a> <span class=muted>" + s.event_date + "</span></li>").join("")
     : '<li class="muted">None yet.</li>';
+});
+async function loadCands() {
+  try {
+    const r = await fetch("/api/admin/candidates", { headers: adminHeaders() });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.status);
+    $("cands").innerHTML = d.candidates.length
+      ? d.candidates.map(c => "<li>" + c.headliner + " <span class=muted>" +
+          c.status + " · score " + c.score + " · " + c.events_count + " dates · " +
+          c.first_date + (c.show_slug ? ' · <a href="/shows/' + encodeURIComponent(c.show_slug) + '">show</a>' : "") +
+          (c.reason ? " · " + c.reason : "") + "</span></li>").join("")
+      : '<li class="muted">No candidates yet. Run discovery.</li>';
+  } catch { /* token not set yet */ }
+}
+loadCands();
+$("runPipe").addEventListener("click", async () => {
+  const btn = $("runPipe"); btn.disabled = true;
+  $("pipeMsg").textContent = "Discovering, qualifying, publishing (can take a minute)…";
+  try {
+    const r = await fetch("/api/admin/pipeline/run", {
+      method: "POST", headers: { "content-type": "application/json", ...adminHeaders() },
+      body: JSON.stringify({ windowDays: 14, qualifyLimit: 10, publishLimit: 1 }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.message || d.error);
+    $("pipeMsg").textContent =
+      "Events " + d.discovery.events + ", candidates " + d.discovery.candidates +
+      ", qualified " + d.qualified.join(", ") +
+      ", published " + d.published.map(p => p.headliner).join(", ") +
+      (d.errors.length ? ", errors: " + JSON.stringify(d.errors) : "");
+    loadCands();
+  } catch (err) { $("pipeMsg").textContent = "Failed: " + err.message; }
+  btn.disabled = false;
 });
 $("build").addEventListener("submit", async (e) => {
   e.preventDefault();

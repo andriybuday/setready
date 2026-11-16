@@ -211,28 +211,30 @@ export async function buildShow(
         setlist?.url || null,
       )
       .run();
-    if (setlist) {
-      for (const [j, song] of setlist.songs.entries()) {
-        await db
-          .prepare(
-            `INSERT INTO songs
-               (show_id, artist_id, position, title, normalized_title,
-                original_artist, is_tape, probability, included)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            show.id,
-            artistId,
-            j + 1,
-            song.title,
-            normalizeName(song.title),
-            song.originalArtist,
-            song.tape ? 1 : 0,
-            probabilities.get(normalizeName(song.title)) ?? null,
-            excluded.has(`${artistId}|${normalizeName(song.title)}`) ? 0 : 1,
-          )
-          .run();
-      }
+    if (setlist && setlist.songs.length > 0) {
+      // One D1 batch per band keeps Worker subrequest counts sane.
+      await db.batch(
+        setlist.songs.map((song, j) =>
+          db
+            .prepare(
+              `INSERT INTO songs
+                 (show_id, artist_id, position, title, normalized_title,
+                  original_artist, is_tape, probability, included)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              show.id,
+              artistId,
+              j + 1,
+              song.title,
+              normalizeName(song.title),
+              song.originalArtist,
+              song.tape ? 1 : 0,
+              probabilities.get(normalizeName(song.title)) ?? null,
+              excluded.has(`${artistId}|${normalizeName(song.title)}`) ? 0 : 1,
+            ),
+        ),
+      );
     }
     results.push({
       band,
