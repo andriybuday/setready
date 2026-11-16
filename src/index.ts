@@ -1,5 +1,5 @@
 import { adminHealth } from "./lib/adminHealth";
-import { runDailyAutomation } from "./lib/automation";
+import { runDailyAutomation, syncPublishedTourDescriptions } from "./lib/automation";
 import { authorizeAdmin, requiresAdmin } from "./lib/auth";
 import type { Env } from "./env";
 import { publishShowToYouTube, publishTourToYouTube } from "./lib/publish";
@@ -349,7 +349,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
     if (url.pathname === "/api/admin/pipeline/run" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as {
-        windowDays?: number; qualifyLimit?: number; publishLimit?: number; stage?: "full"|"discover"|"qualify"|"publish"|"tick";
+        windowDays?: number; qualifyLimit?: number; publishLimit?: number; stage?: "full"|"discover"|"qualify"|"publish"|"tick"; enforceYouTubeBudget?: boolean;
       };
       const summary = await runPipeline(env.DB, {
         setlistfm: env.SETLISTFM_API_KEY,
@@ -361,7 +361,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       }, new Date().toISOString().slice(0, 10), {
         windowDays: body.windowDays,
         qualifyLimit: body.qualifyLimit,
-        publishLimit: body.publishLimit, stage: body.stage,
+        publishLimit: body.publishLimit, stage: body.stage, enforceYouTubeBudget: body.enforceYouTubeBudget,
       });
       return json({ ok: true, ...summary });
     }
@@ -684,17 +684,47 @@ export default {
       spotifyClientId: env.SPOTIFY_CLIENT_ID,
       spotifyClientSecret: env.SPOTIFY_CLIENT_SECRET,
     };
+    const today = new Date().toISOString().slice(0, 10);
     ctx.waitUntil(
       (async () => {
-        if (controller.cron === "15 9 * * *") {
-          const daily = await runDailyAutomation(env.DB, keys);
-          console.log("automation", JSON.stringify(daily));
+        switch (controller.cron) {
+          case "30 6 * * *": {
+            const r = await runPipeline(env.DB, keys, today, { stage: "discover", windowDays: 14 });
+            console.log("pipeline-discover", JSON.stringify(r.discovery));
+            break;
+          }
+          case "0 * * * *": {
+            const r = await runPipeline(env.DB, keys, today, { stage: "qualify", qualifyLimit: 2 });
+            console.log("pipeline-qualify", JSON.stringify(r));
+            break;
+          }
+          case "10 7,8 * * *": {
+            const r = await runPipeline(env.DB, keys, today, {
+              stage: "publish", publishLimit: 1, enforceYouTubeBudget: true,
+            });
+            console.log("pipeline-publish", JSON.stringify(r));
+            break;
+          }
+          case "15 12 * * *": {
+            const daily = await runDailyAutomation(env.DB, keys);
+            console.log("automation", JSON.stringify(daily));
+            break;
+          }
+          case "0 13 * * 1": {
+            if (keys.googleClientId && keys.googleClientSecret && keys.spotifyClientId && keys.spotifyClientSecret) {
+              const r = await syncPublishedTourDescriptions(env.DB, {
+                googleClientId: keys.googleClientId,
+                googleClientSecret: keys.googleClientSecret,
+                spotifyClientId: keys.spotifyClientId,
+                spotifyClientSecret: keys.spotifyClientSecret,
+              });
+              console.log("weekly-sync", JSON.stringify(r));
+            }
+            break;
+          }
+          default:
+            console.log("unknown cron", controller.cron);
         }
-        const pipeline = await runPipeline(
-          env.DB, keys, new Date().toISOString().slice(0, 10),
-          { windowDays: 14, qualifyLimit: 3, publishLimit: 1, stage: "tick" },
-        );
-        console.log("pipeline", JSON.stringify(pipeline));
       })(),
     );
   },

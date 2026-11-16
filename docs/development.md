@@ -38,7 +38,11 @@ later, optional step.
 
 ## Automation and agents
 
-- Daily 09:15 UTC cron runs refresh/freeze/actual/republish-if-changed.
+- Optimized cron (UTC): 06:30 discovery, hourly qualification
+  (max 2), 07:10/08:10 combined post-Pacific-reset publish window
+  (quota-ledger enforced, automated YouTube search budget 80/day),
+  12:15 tracking refresh/freeze/actual/republish-if-changed, and
+  Monday 13:00 description sync for published tours (max 10).
   Manual trigger: `POST /api/admin/run-automation` (operator token).
 - Health: `GET /api/admin/health` (operator token).
 - MCP (stateless JSON-RPC): `POST /mcp`; `tools/list` is open,

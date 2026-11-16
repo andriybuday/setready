@@ -1,3 +1,4 @@
+import { getQuotaState } from "./quota";
 import * as spotify from "./spotify";
 import * as youtube from "./youtube";
 
@@ -70,5 +71,5 @@ export async function adminHealth(
     .prepare("SELECT service, updated_at FROM oauth_credentials ORDER BY service")
     .all();
 
-  return { services, trackMatches: matchCounts, credentialUpdatedAt: tokenAges };
+  return { services, youtubeQuota: await getQuotaState(db), trackMatches: matchCounts, credentialUpdatedAt: tokenAges };
 }

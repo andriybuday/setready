@@ -1,5 +1,6 @@
 import { isoDatePlus } from "./automation";
 import { normalizeName } from "./normalize";
+import { estimateYouTubeSearches, getQuotaState, isQuotaError, recordYouTubeUsage } from "./quota";
 import { publishTourToYouTube } from "./publish";
 import { publishTourToSpotify } from "./publishSpotify";
 import { getRecentSetlists, parseSetlistDate } from "./setlistfm";
@@ -137,6 +138,7 @@ export interface PipelineSummary {
   qualified: string[];
   rejected: Array<{ headliner: string; reason: string }>;
   published: Array<{ headliner: string; tourSlug: string; youtube?: string; spotify?: string }>;
+  deferred: Array<{ headliner: string; reason: string }>;
   errors: Array<{ headliner: string; error: string }>;
 }
 
@@ -158,6 +160,7 @@ export async function runPipeline(
   options: {
     windowDays?: number; qualifyLimit?: number; publishLimit?: number;
     stage?: "full" | "discover" | "qualify" | "publish" | "tick";
+    enforceYouTubeBudget?: boolean;
   } = {},
 ): Promise<PipelineSummary> {
   if (!keys.ticketmaster) throw new Error("ticketmaster_not_configured");
@@ -178,7 +181,7 @@ export async function runPipeline(
     discovery: stage === "full" || stage === "discover"
       ? await discoverCandidates(db, keys.ticketmaster, today, options.windowDays ?? 14)
       : { window: [today, today], events: 0, candidates: 0, stored: 0 },
-    qualified: [], rejected: [], published: [], errors: [],
+    qualified: [], rejected: [], published: [], deferred: [], errors: [],
   };
   if (stage === "discover") return summary;
 
@@ -208,67 +211,120 @@ export async function runPipeline(
 
   if (stage === "qualify") return summary;
   let publishLimit = options.publishLimit ?? 1;
-  if (fromTick) {
-    // Automated ticks may fire every 15 minutes; cap total automated
-    // publishes to 2 tours/day to stay inside YouTube quota/search limits.
-    const row = await db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM tour_candidates WHERE status = 'published' AND date(updated_at) = date('now')",
-      )
-      .first<{ n: number }>();
-    publishLimit = Math.min(publishLimit, Math.max(0, 2 - (row?.n ?? 0)));
-  }
   if (publishLimit <= 0) return summary;
+
   const { results: ready } = await db
     .prepare(
       `SELECT id, headliner, tour_name, bands_json, first_date FROM tour_candidates
-        WHERE status = 'qualified' ORDER BY score DESC LIMIT ?`,
+        WHERE status = 'qualified' ORDER BY first_date ASC, score DESC LIMIT ?`,
     )
-    .bind(publishLimit)
+    .bind(options.enforceYouTubeBudget ? Math.max(publishLimit * 5, 5) : publishLimit)
     .all<{ id: number; headliner: string; tour_name: string; bands_json: string; first_date: string }>();
 
+  let successfulPublishes = 0;
   for (const c of ready) {
+    if (successfulPublishes >= publishLimit) break;
+    const bands = JSON.parse(c.bands_json) as string[];
+    let built;
     try {
-      const bands = JSON.parse(c.bands_json) as string[];
-      const built = await buildShow(
+      built = await buildShow(
         db,
         { headliner: c.headliner, date: c.first_date, bands, mode: "predicted", delayMs: 550 },
         keys,
       );
-      // Import the full itinerary before publishing so descriptions
-      // carry every stop, not just the representative built show.
-      const tourForImport = await db.prepare("SELECT id FROM tours WHERE slug = ?")
-        .bind(built.tourSlug).first<{ id: number }>();
-      if (tourForImport && keys.ticketmaster) {
-        await importTourStops(db, tourForImport.id, keys.ticketmaster);
-      }
-      const out: { headliner: string; tourSlug: string; youtube?: string; spotify?: string } = {
-        headliner: c.headliner, tourSlug: built.tourSlug,
-      };
-      let ytAdded = 0, spAdded = 0, totalSongs = 0;
-      if (keys.googleClientId && keys.googleClientSecret) {
-        const r = await publishTourToYouTube(db, built.tourSlug, keys.googleClientId, keys.googleClientSecret);
-        out.youtube = r.youtubeMusic; ytAdded = r.added; totalSongs = r.added + r.unmatched.length + r.failed.length;
-      }
-      if (keys.spotifyClientId && keys.spotifyClientSecret) {
-        const r = await publishTourToSpotify(db, built.tourSlug, keys.spotifyClientId, keys.spotifyClientSecret);
-        out.spotify = r.spotify; spAdded = r.added; totalSongs = Math.max(totalSongs, r.added + r.unmatched.length + r.failed.length);
-      }
-      const tourRow = await db.prepare("SELECT id FROM tours WHERE slug = ?")
-        .bind(built.tourSlug).first<{ id: number }>();
-      const ratio = totalSongs ? Math.max(ytAdded, spAdded) / totalSongs : 0;
-      await db
-        .prepare(
-          "UPDATE tour_candidates SET status = 'published', tour_id = ?, show_slug = ?, reason = ?, updated_at = datetime('now') WHERE id = ?",
-        )
-        .bind(tourRow?.id ?? null, built.slug, `match ratio ${ratio.toFixed(2)}`, c.id)
-        .run();
-      summary.published.push(out);
     } catch (err) {
       const message = err instanceof Error ? err.message.slice(0, 200) : String(err);
       await db.prepare(
         "UPDATE tour_candidates SET status = 'failed', reason = ?, updated_at = datetime('now') WHERE id = ?",
       ).bind(message, c.id).run();
+      summary.errors.push({ headliner: c.headliner, error: message });
+      continue;
+    }
+
+    const tourForImport = await db.prepare("SELECT id FROM tours WHERE slug = ?")
+      .bind(built.tourSlug).first<{ id: number }>();
+    if (tourForImport && keys.ticketmaster) {
+      await importTourStops(db, tourForImport.id, keys.ticketmaster);
+    }
+
+    const out: { headliner: string; tourSlug: string; youtube?: string; spotify?: string } = {
+      headliner: c.headliner, tourSlug: built.tourSlug,
+    };
+    let ytAdded = 0, spAdded = 0, totalSongs = 0;
+    let ytError = "", spError = "", ytDeferred = "";
+
+    // Spotify is independent: it proceeds even when YouTube is deferred
+    // or out of quota, and vice versa.
+    if (keys.spotifyClientId && keys.spotifyClientSecret) {
+      try {
+        const r = await publishTourToSpotify(db, built.tourSlug, keys.spotifyClientId, keys.spotifyClientSecret);
+        out.spotify = r.spotify; spAdded = r.added;
+        totalSongs = Math.max(totalSongs, r.added + r.unmatched.length + r.failed.length);
+      } catch (err) {
+        spError = err instanceof Error ? err.message.slice(0, 200) : String(err);
+      }
+    }
+
+    if (keys.googleClientId && keys.googleClientSecret) {
+      try {
+        if (options.enforceYouTubeBudget) {
+          const quota = await getQuotaState(db);
+          const estimate = await estimateYouTubeSearches(db, built.slug);
+          if (estimate > quota.automatedSearchRemaining) {
+            ytDeferred = `youtube search budget: needs ~${estimate}, remaining ${quota.automatedSearchRemaining}/${quota.automatedSearchBudget} on ${quota.pacificDate}`;
+          }
+        }
+        if (!ytDeferred) {
+          const r = await publishTourToYouTube(db, built.tourSlug, keys.googleClientId, keys.googleClientSecret);
+          out.youtube = r.youtubeMusic; ytAdded = r.added;
+          totalSongs = Math.max(totalSongs, r.added + r.unmatched.length + r.failed.length);
+          await recordYouTubeUsage(db, {
+            searches: r.searched,
+            units: 50 + 50 * r.added,
+            tourPublished: true,
+          });
+        }
+      } catch (err) {
+        if (isQuotaError(err)) {
+          ytDeferred = "youtube quota exceeded; retry after Pacific reset";
+        } else {
+          ytError = err instanceof Error ? err.message.slice(0, 200) : String(err);
+        }
+      }
+    }
+
+    const tourRow = await db.prepare("SELECT id FROM tours WHERE slug = ?")
+      .bind(built.tourSlug).first<{ id: number }>();
+    const anyPublished = Boolean(out.youtube || out.spotify);
+    const fullyPublished = Boolean(
+      (!keys.googleClientId || out.youtube) && (!keys.spotifyClientId || out.spotify),
+    );
+    const ratio = totalSongs ? Math.max(ytAdded, spAdded) / totalSongs : 0;
+    const reasonParts = [
+      `match ratio ${ratio.toFixed(2)}`,
+      out.spotify ? "spotify ok" : spError ? `spotify failed: ${spError}` : "",
+      out.youtube ? "youtube ok" : ytDeferred || (ytError ? `youtube failed: ${ytError}` : ""),
+    ].filter(Boolean);
+
+    if (fullyPublished) {
+      successfulPublishes += 1;
+      await db.prepare(
+        "UPDATE tour_candidates SET status = 'published', tour_id = ?, show_slug = ?, reason = ?, updated_at = datetime('now') WHERE id = ?",
+      ).bind(tourRow?.id ?? null, built.slug, reasonParts.join("; "), c.id).run();
+      summary.published.push(out);
+    } else if (ytDeferred && !ytError) {
+      // Keep qualified so a post-reset window retries YouTube; Spotify
+      // already published will simply be reused/no-op then.
+      await db.prepare(
+        "UPDATE tour_candidates SET status = 'qualified', tour_id = ?, show_slug = ?, reason = ?, updated_at = datetime('now') WHERE id = ?",
+      ).bind(tourRow?.id ?? null, built.slug, reasonParts.join("; "), c.id).run();
+      if (anyPublished) summary.published.push(out);
+      summary.deferred.push({ headliner: c.headliner, reason: ytDeferred });
+    } else {
+      const message = [spError, ytError].filter(Boolean).join("; ") || "publish failed";
+      await db.prepare(
+        "UPDATE tour_candidates SET status = 'failed', tour_id = ?, show_slug = ?, reason = ?, updated_at = datetime('now') WHERE id = ?",
+      ).bind(tourRow?.id ?? null, built.slug, message, c.id).run();
       summary.errors.push({ headliner: c.headliner, error: message });
     }
   }

@@ -2,6 +2,7 @@ import { normalizeName } from "./normalize";
 import { publishTourToYouTube } from "./publish";
 import { publishTourToSpotify } from "./publishSpotify";
 import { buildShow, type BuildMode } from "./shows";
+import { syncTourDescriptions } from "./syncDescriptions";
 import { importTourStops } from "./tours";
 
 export function tracklistHash(entries: Array<{ artist: string; title: string }>): string {
@@ -203,4 +204,34 @@ export async function runDailyAutomation(
   }
 
   return summary;
+}
+
+/** Weekly: refresh titles/descriptions on published tours (capped). */
+export async function syncPublishedTourDescriptions(
+  db: D1Database,
+  creds: {
+    googleClientId: string; googleClientSecret: string;
+    spotifyClientId: string; spotifyClientSecret: string;
+  },
+  limit = 10,
+): Promise<{ synced: string[]; errors: Array<{ slug: string; error: string }> }> {
+  const { results } = await db
+    .prepare(
+      `SELECT DISTINCT t.slug FROM tours t
+        JOIN published_playlists p ON p.tour_id = t.id
+       ORDER BY t.updated_at LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ slug: string }>();
+  const synced: string[] = [];
+  const errors: Array<{ slug: string; error: string }> = [];
+  for (const row of results) {
+    try {
+      await syncTourDescriptions(db, row.slug, creds);
+      synced.push(row.slug);
+    } catch (err) {
+      errors.push({ slug: row.slug, error: err instanceof Error ? err.message.slice(0, 200) : String(err) });
+    }
+  }
+  return { synced, errors };
 }
