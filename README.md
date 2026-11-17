@@ -2,6 +2,9 @@
 
 **Hear the show before doors.**
 
+<img width="593" height="271" alt="image" src="https://github.com/user-attachments/assets/6d052820-bf3e-4624-9ab2-6755a37008c8" />
+
+
 SetReady turns real concert setlists into public playlists you can save before a gig and relive after it. It discovers upcoming tours, works out what every band has been playing, publishes one canonical playlist per tour and lineup to Spotify and YouTube Music, keeps that playlist current, and later swaps in the exact setlist played at each show.
 
 **Live app:** [setready.setready.workers.dev](https://setready.setready.workers.dev)
