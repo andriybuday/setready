@@ -35,6 +35,7 @@ export interface TourEvent {
   lineup: string[];
   /** Billing order as listed (headliner first). */
   billing: string[];
+  genres: string[];
   attractionCount: number;
 }
 
@@ -70,6 +71,14 @@ export function parseTourEvents(data: unknown, artistName = ""): TourEvent[] {
     const cityObj = isRecord(venueData["city"]) ? venueData["city"] : {};
     const stateObj = isRecord(venueData["state"]) ? venueData["state"] : {};
     const countryObj = isRecord(venueData["country"]) ? venueData["country"] : {};
+    const genres = new Set<string>();
+    for (const c of asArray(event["classifications"]).filter(isRecord)) {
+      for (const kind of ["genre", "subGenre"] as const) {
+        const obj = isRecord(c[kind]) ? c[kind] : {};
+        const name = asString(obj["name"]);
+        if (name && name !== "Undefined") genres.add(name);
+      }
+    }
     const parsed: TourEvent = {
       eventDate,
       eventName: asString(event["name"]),
@@ -80,6 +89,7 @@ export function parseTourEvents(data: unknown, artistName = ""): TourEvent[] {
       ticketmasterEventId: asString(event["id"]),
       lineup: playingOrder(names, headliner),
       billing: names,
+      genres: [...genres],
       attractionCount: names.length,
     };
     const key = `${eventDate}|${parsed.city.toLowerCase()}|${(parsed.billing[0] ?? "").toLowerCase()}`;

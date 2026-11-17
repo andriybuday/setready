@@ -189,6 +189,11 @@ export async function publishShowToYouTube(
     clientSecret,
   );
 
+  const { results: cachedRows } = await db
+    .prepare("SELECT artist_normalized, title_normalized, status, service_track_id, matched_title FROM track_matches WHERE service = 'youtube'")
+    .all<CachedMatch & { artist_normalized: string; title_normalized: string }>();
+  const cacheByKey = new Map(cachedRows.map((m) => [`${m.artist_normalized}|${m.title_normalized}`, m]));
+  const cacheWrites: D1PreparedStatement[] = [];
   let fromCache = 0;
   let searched = 0;
   const entries: Array<{ artist: string; title: string; videoId: string }> = [];
@@ -198,13 +203,7 @@ export async function publishShowToYouTube(
   for (const song of songs) {
     const artist = matchArtist(song);
     const artistNorm = normalizeName(artist);
-    const cached = await db
-      .prepare(
-        `SELECT status, service_track_id, matched_title FROM track_matches
-          WHERE service = 'youtube' AND artist_normalized = ? AND title_normalized = ?`,
-      )
-      .bind(artistNorm, song.normalized_title)
-      .first<CachedMatch>();
+    const cached = cacheByKey.get(`${artistNorm}|${song.normalized_title}`);
 
     if (
       cached?.status === "matched" &&
@@ -233,7 +232,7 @@ export async function publishShowToYouTube(
       10,
     );
     const hit = chooseCandidate(candidates, artist, song.title, usedVideoIds);
-    await db
+    cacheWrites.push(db
       .prepare(
         `INSERT INTO track_matches
            (service, artist_normalized, title_normalized, status,
@@ -255,8 +254,7 @@ export async function publishShowToYouTube(
         hit?.title ?? null,
         artist,
         hit ? 0.5 : null,
-      )
-      .run();
+      ));
     if (hit) {
       usedVideoIds.add(hit.videoId);
       entries.push({ artist, title: song.title, videoId: hit.videoId });
@@ -265,6 +263,9 @@ export async function publishShowToYouTube(
     }
   }
 
+  if (cacheWrites.length > 0) {
+    for (let i = 0; i < cacheWrites.length; i += 50) await db.batch(cacheWrites.slice(i, i + 50));
+  }
   const bandsInPlayingOrder = [...new Set(songs.map((s) => s.artist_name))];
   const stops = show.tour_id
     ? await listTourStops(db, show.tour_id)

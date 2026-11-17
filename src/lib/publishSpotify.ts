@@ -82,6 +82,8 @@ interface CachedMatch {
   status: string;
   service_track_id: string | null;
   service_track_uri: string | null;
+  artist_normalized?: string;
+  title_normalized?: string;
 }
 
 export async function publishShowToSpotify(
@@ -138,6 +140,11 @@ export async function publishShowToSpotify(
       .run();
   }
 
+  const { results: spotifyCacheRows } = await db
+    .prepare("SELECT artist_normalized, title_normalized, status, service_track_id, service_track_uri FROM track_matches WHERE service = 'spotify'")
+    .all<CachedMatch>();
+  const spotifyCache = new Map(spotifyCacheRows.map((m) => [`${m.artist_normalized}|${m.title_normalized}`, m]));
+  const cacheWrites: D1PreparedStatement[] = [];
   let fromCache = 0;
   let searched = 0;
   const entries: Array<{ artist: string; title: string; uri: string }> = [];
@@ -147,13 +154,7 @@ export async function publishShowToSpotify(
   for (const song of songs) {
     const artist = matchArtist(song);
     const artistNorm = normalizeName(artist);
-    const cached = await db
-      .prepare(
-        `SELECT status, service_track_id, service_track_uri FROM track_matches
-          WHERE service = 'spotify' AND artist_normalized = ? AND title_normalized = ?`,
-      )
-      .bind(artistNorm, song.normalized_title)
-      .first<CachedMatch>();
+    const cached = spotifyCache.get(`${artistNorm}|${song.normalized_title}`);
 
     if (
       cached?.status === "matched" &&
@@ -174,7 +175,7 @@ export async function publishShowToSpotify(
     searched += 1;
     const candidates = await spotify.searchTracks(accessToken, artist, song.title, 10);
     const hit = chooseSpotifyCandidate(candidates, artist, song.title, usedUris);
-    await db
+    cacheWrites.push(db
       .prepare(
         `INSERT INTO track_matches
            (service, artist_normalized, title_normalized, status,
@@ -198,8 +199,7 @@ export async function publishShowToSpotify(
         hit?.name ?? null,
         hit?.artists ?? artist,
         hit ? 0.7 : null,
-      )
-      .run();
+      ));
     if (hit) {
       usedUris.add(hit.uri);
       entries.push({ artist, title: song.title, uri: hit.uri });
@@ -208,6 +208,9 @@ export async function publishShowToSpotify(
     }
   }
 
+  if (cacheWrites.length > 0) {
+    for (let i = 0; i < cacheWrites.length; i += 50) await db.batch(cacheWrites.slice(i, i + 50));
+  }
   const displayTitle = overrides.title ?? show.title;
   const bandsInPlayingOrder = [...new Set(songs.map((s) => s.artist_name))];
   const stops = show.tour_id

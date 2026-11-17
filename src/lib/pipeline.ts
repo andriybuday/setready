@@ -15,7 +15,15 @@ export interface CandidateGroup {
   bandsPlayingOrder: string[];
   events: TourEvent[];
   countries: Set<string>;
+  genres: Set<string>;
+  isHeavyMetal: boolean;
   score: number;
+}
+
+const HEAVY_METAL_GENRE = /(metal|thrash|grindcore|deathcore|metalcore)/i;
+
+export function isHeavyMetalGenres(genres: Iterable<string>): boolean {
+  return [...genres].some((g) => HEAVY_METAL_GENRE.test(g));
 }
 
 function tourNameFromEvent(e: TourEvent): string {
@@ -39,19 +47,22 @@ export function groupCandidates(events: TourEvent[]): CandidateGroup[] {
     if (!g) {
       g = {
         key, headliner, tourName: "", bandsPlayingOrder: e.lineup,
-        events: [], countries: new Set(), score: 0,
+        events: [], countries: new Set(), genres: new Set(), isHeavyMetal: false, score: 0,
       };
       groups.set(key, g);
     }
     g.events.push(e);
     if (e.country) g.countries.add(e.country);
+    for (const genre of e.genres) g.genres.add(genre);
     if (!g.tourName) g.tourName = tourNameFromEvent(e);
     if (e.lineup.length > g.bandsPlayingOrder.length) g.bandsPlayingOrder = e.lineup;
   }
   for (const g of groups.values()) {
     g.events.sort((a, b) => a.eventDate.localeCompare(b.eventDate));
+    g.isHeavyMetal = isHeavyMetalGenres(g.genres);
     g.score =
-      g.events.length * 10 + g.countries.size * 3 + Math.min(g.bandsPlayingOrder.length, 4) * 2;
+      g.events.length * 10 + g.countries.size * 3 + Math.min(g.bandsPlayingOrder.length, 4) * 2 +
+      (g.isHeavyMetal ? 30 : 0);
   }
   return [...groups.values()].sort((a, b) => b.score - a.score);
 }
@@ -80,20 +91,22 @@ export async function discoverCandidates(
     statements.push(db
       .prepare(
         `INSERT INTO tour_candidates
-           (candidate_key, headliner, tour_name, bands_json, first_date,
+           (candidate_key, headliner, tour_name, bands_json, genres_json, is_heavy_metal, first_date,
             last_date, events_count, countries_count, score)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(candidate_key) DO UPDATE SET
            tour_name = CASE WHEN excluded.tour_name <> '' THEN excluded.tour_name ELSE tour_name END,
            bands_json = excluded.bands_json,
            first_date = excluded.first_date, last_date = excluded.last_date,
            events_count = excluded.events_count,
            countries_count = excluded.countries_count,
-           score = excluded.score, updated_at = datetime('now')
-         WHERE status = 'discovered'`,
+           genres_json = excluded.genres_json,
+           is_heavy_metal = excluded.is_heavy_metal,
+           score = excluded.score, updated_at = datetime('now')`,
       )
       .bind(
         g.key, g.headliner, g.tourName, JSON.stringify(g.bandsPlayingOrder),
+        JSON.stringify([...g.genres]), g.isHeavyMetal ? 1 : 0,
         first, last, g.events.length, g.countries.size, g.score,
       ));
   }
@@ -188,7 +201,7 @@ export async function runPipeline(
   const fresh = stage === "publish" ? [] : (await db
     .prepare(
       `SELECT id, headliner, bands_json, first_date FROM tour_candidates
-        WHERE status = 'discovered' ORDER BY score DESC LIMIT ?`,
+        WHERE status = 'discovered' ORDER BY is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
     )
     .bind(options.qualifyLimit ?? 10)
     .all<{ id: number; headliner: string; bands_json: string; first_date: string }>()).results;
@@ -216,7 +229,7 @@ export async function runPipeline(
   const { results: ready } = await db
     .prepare(
       `SELECT id, headliner, tour_name, bands_json, first_date FROM tour_candidates
-        WHERE status = 'qualified' ORDER BY first_date ASC, score DESC LIMIT ?`,
+        WHERE status = 'qualified' ORDER BY is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
     )
     .bind(options.enforceYouTubeBudget ? Math.max(publishLimit * 5, 5) : publishLimit)
     .all<{ id: number; headliner: string; tour_name: string; bands_json: string; first_date: string }>();
