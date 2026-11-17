@@ -1,4 +1,5 @@
 import { isoDatePlus } from "./automation";
+import { hasFollowedArtist } from "./followedArtists";
 import { normalizeName } from "./normalize";
 import { estimateYouTubeSearches, getQuotaState, isQuotaError, recordYouTubeUsage } from "./quota";
 import { publishTourToYouTube } from "./publish";
@@ -17,6 +18,7 @@ export interface CandidateGroup {
   countries: Set<string>;
   genres: Set<string>;
   isHeavyMetal: boolean;
+  isFollowed: boolean;
   score: number;
 }
 
@@ -47,7 +49,7 @@ export function groupCandidates(events: TourEvent[]): CandidateGroup[] {
     if (!g) {
       g = {
         key, headliner, tourName: "", bandsPlayingOrder: e.lineup,
-        events: [], countries: new Set(), genres: new Set(), isHeavyMetal: false, score: 0,
+        events: [], countries: new Set(), genres: new Set(), isHeavyMetal: false, isFollowed: false, score: 0,
       };
       groups.set(key, g);
     }
@@ -60,9 +62,10 @@ export function groupCandidates(events: TourEvent[]): CandidateGroup[] {
   for (const g of groups.values()) {
     g.events.sort((a, b) => a.eventDate.localeCompare(b.eventDate));
     g.isHeavyMetal = isHeavyMetalGenres(g.genres);
+    g.isFollowed = hasFollowedArtist(g.bandsPlayingOrder);
     g.score =
       g.events.length * 10 + g.countries.size * 3 + Math.min(g.bandsPlayingOrder.length, 4) * 2 +
-      (g.isHeavyMetal ? 30 : 0);
+      (g.isHeavyMetal ? 30 : 0) + (g.isFollowed ? 100 : 0);
   }
   return [...groups.values()].sort((a, b) => b.score - a.score);
 }
@@ -85,15 +88,15 @@ export async function discoverCandidates(
   const groups = groupCandidates(events);
   const statements: D1PreparedStatement[] = [];
   for (const g of groups) {
-    if (g.events.length < 2) continue; // a tour has repeat dates
+    if (g.events.length < 2 && !g.isFollowed) continue; // tours repeat; followed one-offs still matter
     const first = g.events[0]?.eventDate as string;
     const last = g.events[g.events.length - 1]?.eventDate as string;
     statements.push(db
       .prepare(
         `INSERT INTO tour_candidates
-           (candidate_key, headliner, tour_name, bands_json, genres_json, is_heavy_metal, first_date,
+           (candidate_key, headliner, tour_name, bands_json, genres_json, is_heavy_metal, is_followed, first_date,
             last_date, events_count, countries_count, score)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(candidate_key) DO UPDATE SET
            tour_name = CASE WHEN excluded.tour_name <> '' THEN excluded.tour_name ELSE tour_name END,
            bands_json = excluded.bands_json,
@@ -102,11 +105,12 @@ export async function discoverCandidates(
            countries_count = excluded.countries_count,
            genres_json = excluded.genres_json,
            is_heavy_metal = excluded.is_heavy_metal,
+           is_followed = excluded.is_followed,
            score = excluded.score, updated_at = datetime('now')`,
       )
       .bind(
         g.key, g.headliner, g.tourName, JSON.stringify(g.bandsPlayingOrder),
-        JSON.stringify([...g.genres]), g.isHeavyMetal ? 1 : 0,
+        JSON.stringify([...g.genres]), g.isHeavyMetal ? 1 : 0, g.isFollowed ? 1 : 0,
         first, last, g.events.length, g.countries.size, g.score,
       ));
   }
@@ -201,7 +205,7 @@ export async function runPipeline(
   const fresh = stage === "publish" ? [] : (await db
     .prepare(
       `SELECT id, headliner, bands_json, first_date FROM tour_candidates
-        WHERE status = 'discovered' ORDER BY is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
+        WHERE status = 'discovered' ORDER BY is_followed DESC, is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
     )
     .bind(options.qualifyLimit ?? 10)
     .all<{ id: number; headliner: string; bands_json: string; first_date: string }>()).results;
@@ -229,7 +233,7 @@ export async function runPipeline(
   const { results: ready } = await db
     .prepare(
       `SELECT id, headliner, tour_name, bands_json, first_date FROM tour_candidates
-        WHERE status = 'qualified' ORDER BY is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
+        WHERE status = 'qualified' ORDER BY is_followed DESC, is_heavy_metal DESC, first_date ASC, score DESC LIMIT ?`,
     )
     .bind(options.enforceYouTubeBudget ? Math.max(publishLimit * 5, 5) : publishLimit)
     .all<{ id: number; headliner: string; tour_name: string; bands_json: string; first_date: string }>();

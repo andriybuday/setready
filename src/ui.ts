@@ -128,7 +128,7 @@ async function loadCands() {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.status);
     $("cands").innerHTML = d.candidates.length
-      ? d.candidates.map(c => "<li>" + c.headliner + " <span class=muted>" +
+      ? d.candidates.map(c => "<li>" + (c.is_followed ? "★ " : "") + c.headliner + " <span class=muted>" +
           c.status + " · score " + c.score + " · " + c.events_count + " dates · " +
           c.first_date + (c.show_slug ? ' · <a href="/shows/' + encodeURIComponent(c.show_slug) + '">show</a>' : "") +
           (c.reason ? " · " + c.reason : "") + "</span></li>").join("")

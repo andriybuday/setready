@@ -340,8 +340,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       const auth = authorizeAdmin(request, env.ADMIN_TOKEN);
       if (!auth.ok) return json({ error: auth.error }, auth.status);
       const { results } = await env.DB.prepare(
-        `SELECT headliner, tour_name, bands_json, first_date, last_date,
-                events_count, score, status, reason, show_slug
+        `SELECT headliner, tour_name, bands_json, genres_json, is_heavy_metal, is_followed,
+                first_date, last_date, events_count, score, status, reason, show_slug
            FROM tour_candidates ORDER BY score DESC LIMIT 50`,
       ).all();
       return json({ candidates: results });

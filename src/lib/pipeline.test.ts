@@ -13,6 +13,19 @@ const ev = (
   lineup: [...billing].reverse(), billing, genres, attractionCount: billing.length,
 });
 
+describe("groupCandidates followed priority", () => {
+  it("ranks a followed non-metal artist ahead of an unfollowed metal tour", () => {
+    const groups = groupCandidates([
+      ev("2026-11-20", ["Metal Act", "Opener"], "A", ["Metal"]),
+      ev("2026-11-21", ["Metal Act", "Opener"], "B", ["Metal"]),
+      ev("2026-11-20", ["Gorillaz", "Guest"], "C", ["Alternative Rock"]),
+      ev("2026-11-21", ["Gorillaz", "Guest"], "D", ["Alternative Rock"]),
+    ]);
+    expect(groups[0]?.headliner).toBe("Gorillaz");
+    expect(groups[0]?.isFollowed).toBe(true);
+  });
+});
+
 describe("groupCandidates", () => {
   it("groups repeat dates by headliner + band set and ranks bigger tours first", () => {
     const groups = groupCandidates([
